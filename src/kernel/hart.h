@@ -1,0 +1,72 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+#include "list.h"
+#include "spinlock.h"
+#include "proc/process.h"
+
+// Maximum number of harts the kernel can describe.
+//
+// A build parameter, not a source constant: CMake passes it as -DSEELE_MAX_HARTS
+// (see CMakeLists.txt, "Kernel build parameters") and the guard below makes a
+// build that forgets it fail here rather than quietly picking a different
+// hart count than the one on the configure command line.
+//
+// The single hart bound in the kernel. One number sizes boot::info's FDT hart
+// list (boot/info.h), the per-hart `cpus[]` array in hart.cc and the boot stack
+// pool (boot/stack.h), so none of those bounds can drift apart: the pool covers
+// every dense cpuid, and cpus[] is indexed by exactly that cpuid. start.cc
+// static_asserts the pool equality. Kernel stacks live per process (one slot per
+// thread, see proc/process.h), so MAX_HARTS does not bound a stack window.
+#ifndef SEELE_MAX_HARTS
+#error "SEELE_MAX_HARTS is not defined: build the kernel through CMake (see CMakeLists.txt)"
+#endif
+
+constexpr inline std::size_t MAX_HARTS = SEELE_MAX_HARTS;
+
+struct cpu {
+    uint64_t hartid;
+
+    // Interrupt-disable bookkeeping for the current hart.
+    //
+    // `interrupt_depth` counts how many locks the current hart holds, and
+    // `interrupts_were_enabled` remembers sstatus.SIE from before the outermost
+    // lock(), so that only the outermost unlock() has to restore it.
+    uint32_t interrupt_depth = 0;
+    bool interrupts_were_enabled = false;
+
+    // System process: all kernel threads on this hart are created in it and
+    // share its address space. Each hart currently has its own system process
+    // because cross-hart scheduling is not implemented. Null until boot creates it.
+    proc::process* system = nullptr;
+
+    // Fallback thread when this hart has no ready kernel thread. Like other
+    // kernel threads, it belongs to `system` and has its own context and stack;
+    // it is never placed on the ready or sleeping list. Null until boot creates it.
+    proc::thread* idle = nullptr;
+
+    // This hart's currently running thread. kmain() points it at the idle
+    // thread just before switch_thread() enters it, so the hart always has a
+    // current thread once it leaves the boot context; the scheduler updates it
+    // on every switch.
+    proc::thread* current = nullptr;
+
+    Spinlock lock{};
+    IntrusiveList<proc::thread> ready{};
+    IntrusiveList<proc::thread> sleeping{};
+};
+
+// The current hart's dense index, 0..MAX_HARTS-1.
+//
+// _entry (start.S) assigns it before any C++ code runs: hart 0 is the boot hart
+// and keeps 0, every other hart takes the next value from an atomic
+// arrival-order counter. The hardware hartid is not this index -- firmware is
+// allowed to hand out sparse or large hartids -- so a hart that needs the
+// hardware id keeps the value the firmware passed to it (kmain receives it in
+// its first argument). cpuid() is what indexes cpus[] and what spinlocks store
+// as their owner.
+uint64_t cpuid() noexcept;
+
+cpu* mycpu() noexcept;

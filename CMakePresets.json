@@ -1,0 +1,30 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 25,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "qemu-virt",
+            "displayName": "QEMU virt / GCC 16 / RV64GC",
+            "description": "Bare-metal RISC-V 64-bit kernel for QEMU virt, no OpenSBI",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "toolchainFile": "${sourceDir}/cmake/riscv64-unknown-elf.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "SEELE_RISCV_ARCH": "rv64gc",
+                "SEELE_RISCV_ABI": "lp64d",
+                "SEELE_RISCV_CMODEL": "medany"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "qemu-virt",
+            "configurePreset": "qemu-virt"
+        }
+    ]
+}

@@ -1,0 +1,13 @@
+CompileFlags:
+  CompilationDatabase: build
+  # clangd does not query the cross GCC driver (that requires --query-driver at
+  # server startup), so point it at the freestanding libstdc++ headers and the
+  # GCC internal headers that the compiler would find on its own.  Paths are
+  # relative to the compile database directory (build/).
+  Add:
+    - -isystem
+    - ../.pixi/envs/default/riscv64-unknown-elf/include/c++/16.2.0
+    - -isystem
+    - ../.pixi/envs/default/riscv64-unknown-elf/include/c++/16.2.0/backward
+    - -isystem
+    - ../.pixi/envs/default/lib/gcc/riscv64-unknown-elf/16.2.0/include

@@ -1,0 +1,61 @@
+[workspace]
+name = "seele-os"
+version = "0.1.0"
+description = "A small RISC-V 64-bit operating system written in C++26"
+# ./toolchain is a separate repo that assembles the local file channel; this
+# workspace only consumes it.
+channels = ["conda-forge", "ucb-bar", "./toolchain/.channel"]
+platforms = ["linux-64"]
+requires-pixi = ">=0.84"
+
+[dependencies]
+clang-format = "==21.1.8"
+cmake = ">=3.28,<5"
+ninja = ">=1.11,<2"
+nodejs = ">=26,<27"
+typescript = "==6.0.2"
+pnpm = "==12.18.0"
+pre-commit = "==4.7.0"
+qemu = "==8.2.0"
+# Both toolchain packages are served by the local file channel built from
+# ./toolchain (see the seele-toolchain repo).
+riscv64-unknown-elf-gcc = "==16.2.0"
+riscv64-unknown-elf-libstdcxx = "==16.2.0"
+
+[tasks]
+setup = "pnpm install"
+format = "pre-commit run --all-files"
+
+# buildDir is relative to the workspace root and defaults to "build". The
+# parameterized tasks take it as a pixi argument, e.g. `pixi run build build-debug`.
+[tasks.configure]
+cmd = "test -f '{{ buildDir }}/CMakeCache.txt' || cmake --preset qemu-virt -B '{{ buildDir }}'"
+args = [{ arg = "buildDir", default = "build" }]
+description = "Configure CMake in buildDir unless that directory is already configured."
+
+[tasks.build]
+cmd = "cmake --build '{{ buildDir }}'"
+depends-on = [{ task = "configure", args = ["{{ buildDir }}"] }]
+args = [{ arg = "buildDir", default = "build" }]
+description = "Build kernel.elf in buildDir."
+
+[tasks.disk]
+cmd = "pnpm run disk --build-dir '{{ buildDir }}'"
+args = [{ arg = "buildDir", default = "build" }]
+description = "Create the 1 MiB virtio test disk in buildDir."
+
+# pixi matches qemu arguments positionally: [harts] [buildDir].
+[tasks.qemu]
+cmd = "pnpm run qemu --build-dir '{{ buildDir }}' --harts '{{ harts }}'"
+depends-on = [
+    "setup",
+    { task = "build", args = ["{{ buildDir }}"] },
+    { task = "disk", args = ["{{ buildDir }}"] },
+]
+args = [{ arg = "harts", default = "1" }, { arg = "buildDir", default = "build" }]
+description = "Boot kernel.elf from buildDir with harts CPUs (default: 1 hart, build)."
+
+[tasks.clean]
+cmd = "cmake -E rm -rf '{{ buildDir }}'"
+args = [{ arg = "buildDir", default = "build" }]
+description = "Remove buildDir (default: build)."

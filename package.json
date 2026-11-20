@@ -1,0 +1,20 @@
+{
+    "name": "seele-os-tools",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "description": "TypeScript development scripts and QEMU smoke tests for seele-os",
+    "packageManager": "pnpm@12.18.0",
+    "engines": {
+        "node": ">=26"
+    },
+    "scripts": {
+        "disk": "node tools/cli.ts disk",
+        "qemu": "node tools/cli.ts qemu"
+    },
+    "devDependencies": {
+        "@types/node": "26.6.6",
+        "cac": "7.1.0",
+        "prettier": "3.9.10"
+    }
+}

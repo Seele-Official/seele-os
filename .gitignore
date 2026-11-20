@@ -1,0 +1,21 @@
+# pixi environment
+.pixi/
+
+# Toolchain checkout: a separate repo that builds the local file channel.
+/toolchain/
+
+# Node.js tooling
+node_modules/
+
+# CMake/Ninja build tree
+/build/
+/build-*/
+CMakeUserPresets.json
+compile_commands.json
+
+# Build artifacts outside the build tree
+*.elf
+*.o
+disk.img
+
+.cache/

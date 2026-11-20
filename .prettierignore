@@ -1,0 +1,9 @@
+build
+.pixi
+.xmake
+node_modules
+
+# Lockfiles and tool configuration with their own formatter.
+pnpm-lock.yaml
+pixi.lock
+.clang-format
