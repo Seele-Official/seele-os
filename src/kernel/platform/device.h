@@ -21,6 +21,7 @@
 #include <span>
 #include <string_view>
 
+#include "device_object.h"
 #include "mm/addr.h"
 
 namespace fdt {
@@ -78,11 +79,10 @@ constexpr inline size_t MAX_DEVICES = SEELE_MAX_DEVICES;
 constexpr inline size_t MAX_RESOURCES = SEELE_MAX_RESOURCES;
 
 // Probe state, owned by the driver core. `Unbound` is also the "no driver has
-// claimed me yet" state; `Deferred` waits for a retry within its init level.
+// claimed me yet" state. Every matched node is probed at most once.
 enum class Status : uint8_t {
     Unbound,
     Bound,
-    Deferred,
     Failed,
 };
 
@@ -126,14 +126,14 @@ public:
         m_status = status;
     }
 
-    // Driver-owned storage; the driver core allocates it and stores it here,
-    // the equivalent of Linux's dev_get_drvdata().
-    [[nodiscard]] void* driver_data() const noexcept {
-        return m_driver_data;
+    // The successfully probed object, not the raw allocation it was constructed
+    // in. Subsystems borrow its interfaces; the object outlives the kernel.
+    [[nodiscard]] Object* object() const noexcept {
+        return m_object;
     }
 
-    void set_driver_data(void* data) noexcept {
-        m_driver_data = data;
+    void set_object(Object* object) noexcept {
+        m_object = object;
     }
 
 private:
@@ -144,7 +144,7 @@ private:
     uint16_t m_first_resource = 0;
     uint16_t m_resource_count = 0;
     Status m_status = Status::Unbound;
-    void* m_driver_data = nullptr;
+    Object* m_object = nullptr;
 };
 
 // Every enumerated device, in depth-first tree order.

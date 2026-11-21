@@ -140,21 +140,21 @@ void Plic::complete(uint32_t source) noexcept {
     m_region.write<uint32_t>(claim_offset(), source);
 }
 
-driver::Status probe(device::Device& device, void* priv) noexcept {
+device::Object* probe(device::Device& device, void* priv) noexcept {
     if(priv == nullptr) {
-        return driver::Status::Error;
+        return nullptr;
     }
 
     const device::resource* resource = device.find_resource(device::ResourceType::Mmio, 0);
     if(resource == nullptr) {
-        return driver::Status::Error;
+        return nullptr;
     }
     const std::optional<mmio::Region> region = mmio::map(*resource);
     if(!region.has_value()) {
-        return driver::Status::Error;
+        return nullptr;
     }
     if(region->size() < MIN_REGION_SIZE) {
-        return driver::Status::Error;
+        return nullptr;
     }
 
     // `riscv,ndev` is the source count the firmware says the controller
@@ -162,7 +162,7 @@ driver::Status probe(device::Device& device, void* priv) noexcept {
     // request could not be rejected.
     const std::optional<uint32_t> sources = device.u32_property("riscv,ndev");
     if(!sources.has_value() || *sources == 0 || *sources > MAX_SOURCES) {
-        return driver::Status::Error;
+        return nullptr;
     }
 
     // The probe owns the placement new: the driver core only hands over a
@@ -176,11 +176,9 @@ driver::Status probe(device::Device& device, void* priv) noexcept {
     // context names which hart will service external interrupts.
     LOG_DEBUG("plic: {} sources on S-mode context {}", self->source_count(), self->context());
 
-    // Install the object itself as the trap contract's controller. An
-    // interrupt cannot be taken during probe (interrupts are still disabled),
-    // so the order of this and the LOG line does not matter.
-    trap::set_external_controller(*self);
-    return driver::Status::Ok;
+    // The core discovers ExternalController on this object and installs it
+    // before any Device-level driver registers an interrupt source.
+    return self;
 }
 
 }  // namespace drivers::irq

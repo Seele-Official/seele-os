@@ -11,7 +11,7 @@
 //
 // The split is the trap::ExternalController contract in trap.h:
 //
-//   - the probe installs `*this` as the controller; on EXT_INT the trap path
+//   - the core discovers and installs the controller returned by probe; the trap path
 //     calls handle(), which claims a source, asks
 //     trap::dispatch_external_handler() to run the registered handler, and
 //     completes the source.
@@ -43,7 +43,7 @@ namespace drivers::irq {
 // spelling of the same binding.
 constexpr const inline char* kMatch[] = {"sifive,plic-1.0.0", "riscv,plic0", nullptr};
 
-class Plic final : public trap::ExternalController {
+class Plic final : public device::Implements<trap::ExternalController> {
 public:
     // `sources` is the device's `riscv,ndev`: sources are numbered 1..sources.
     // `context` is the PLIC context index this driver programs (see the file
@@ -97,7 +97,8 @@ private:
 // as with ns16550. The object lives for the rest of the kernel, and it is small
 // because the handler table it used to own moved to trap.cc.
 constexpr inline uint32_t kPrivSize = sizeof(Plic);
+static_assert(alignof(Plic) <= driver::PRIVATE_STATE_ALIGN);
 
-driver::Status probe(device::Device& device, void* priv) noexcept;
+device::Object* probe(device::Device& device, void* priv) noexcept;
 
 }  // namespace drivers::irq

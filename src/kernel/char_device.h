@@ -20,12 +20,9 @@
 // console: it answers read(), write() and the panic hooks, and that is the whole
 // contract.
 //
-// Which device a driver binds is declared, not exported: the driver table names
-// driver::Type::Console (drivers/registry.h) and the core installs the object
-// with console::attach(). The interface must be the first base class of the
-// driver's state block, so the core can recover the CharDevice from the
-// driver-agnostic `void*` with a single cast; the driver checks that layout when
-// it binds.
+// The driver core discovers this interface on the object returned by probe
+// using device::dyn_cast (device_object.h), then calls console::attach(). It
+// does not know the concrete driver or assume an interface's offset in storage.
 
 #include <cstddef>
 #include <cstdint>

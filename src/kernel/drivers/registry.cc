@@ -8,11 +8,10 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <new>
 #include <span>
 
 #include "console.h"
-#include "panic.h"
+#include "trap.h"
 #include "platform/device.h"
 
 namespace driver {
@@ -38,16 +37,12 @@ constexpr size_t MAX_DRIVERS = SEELE_MAX_DRIVERS;
 // to hand out a single 40-byte object, while the arena's bytes are already in
 // the image's .bss.
 //
-// The budget is a concrete number, and the two drivers in the table today set
-// it: the PLIC keeps a 32-byte state (its handler table lives in trap.cc now),
-// the UART 304 bytes (two base-class virtual tables, the register window, the
-// programming parameters, its lock, the interrupt state, the panic and reader
-// latches, the overrun counter and the 128-byte transmit plus 64-byte receive
-// queue), and a machine needs one of each, so one boot uses 336 of the 1 KiB and
-// leaves ~688 bytes. Growing a driver's state or the table means rechecking this
-// number; exhaustion is a warning and a Failed device, not a panic.
+// The current PLIC and UART objects fit comfortably in 1 KiB, including their
+// interface subobjects and alignment padding. Growing a driver's state or the
+// table means rechecking this budget; exhaustion is a warning and a Failed
+// device, not a panic.
 constexpr size_t ARENA_SIZE = 1024;
-constexpr size_t ARENA_ALIGN = 16;
+constexpr size_t ARENA_ALIGN = PRIVATE_STATE_ALIGN;
 
 alignas(ARENA_ALIGN) std::byte g_arena[ARENA_SIZE];
 size_t g_arena_used = 0;
@@ -70,14 +65,15 @@ size_t g_arena_used = 0;
     return block;
 }
 
-// Wire a bound device into the subsystem its declared type names. The type is
-// part of the driver table, so the core needs no per-driver callback: for a
-// console it knows the state block starts with the CharDevice the driver bound
-// (registry.h), which is why one cast is all it takes.
-void wire_device(Type type, void* priv) noexcept {
-    switch(type) {
-        case Type::Console: console::attach(*static_cast<CharDevice*>(priv)); return;
-        case Type::Plain: return;
+// Query each supported subsystem independently: one object may expose more
+// than one interface. The returned pointers have already been adjusted by C++
+// base conversions, not reconstructed from the raw state block's address.
+void wire_device(device::Object& object) noexcept {
+    if(auto* controller = device::dyn_cast<trap::ExternalController>(&object)) {
+        trap::set_external_controller(*controller);
+    }
+    if(auto* chars = device::dyn_cast<CharDevice>(&object)) {
+        console::attach(*chars);
     }
 }
 
@@ -90,31 +86,16 @@ void log_probe(const descriptor& descriptor, const device::Device& device) noexc
     LOG_DEBUG("driver {}: {}", descriptor.name, device.name());
 }
 
-// Record a successful probe and wire the device into the subsystem its declared
-// type names. Both the first pass and the Deferred retry end here, so "Bound"
-// means "wired" on every path instead of only the one the author had in mind.
-void bind_device(const descriptor& descriptor, device::Device& device, void* priv) noexcept {
-    device.set_status(device::Status::Bound);
-    if(priv == nullptr) {
-        // A driver that declares a type has to have somewhere to keep the
-        // interface; priv_size == 0 is a table bug, not a reason to skip wiring.
-        SEELE_ASSERT(descriptor.type == Type::Plain,
-                     "driver {}: declared {} but has no private state",
-                     descriptor.name,
-                     static_cast<int>(descriptor.type));
-        return;
-    }
-    wire_device(descriptor.type, priv);
-}
-
-// Run one probe and record the result on the device.
+// Probe once. Only successful, fully wired objects are published on the node;
+// failed probes leave it without an object and never fall back to another driver.
 void run_probe(device::Device& device, const descriptor& descriptor, void* priv) noexcept {
-    const Status status =
-        descriptor.probe != nullptr ? descriptor.probe(device, priv) : Status::Error;
-    switch(status) {
-        case Status::Ok: bind_device(descriptor, device, priv); break;
-        case Status::Deferred: device.set_status(device::Status::Deferred); break;
-        case Status::Error: device.set_status(device::Status::Failed); break;
+    device::Object* object = descriptor.probe != nullptr ? descriptor.probe(device, priv) : nullptr;
+    if(object != nullptr) {
+        wire_device(*object);
+        device.set_object(object);
+        device.set_status(device::Status::Bound);
+    } else {
+        device.set_status(device::Status::Failed);
     }
     log_probe(descriptor, device);
 }
@@ -205,33 +186,8 @@ void probe(InitLevel level, std::span<device::Device> devices) noexcept {
                     continue;
                 }
             }
-            device.set_driver_data(priv);
             run_probe(device, descriptor, priv);
         }
-    }
-
-    // Deferred: the driver asked for a retry because something it needs was not
-    // ready yet. One retry per level is the whole policy for now; a second
-    // failure is terminal so the device does not stay Unbound forever.
-    for(device::Device& device: devices) {
-        if(device.status() != device::Status::Deferred) {
-            continue;
-        }
-        const descriptor* descriptor = match(device);
-        if(descriptor == nullptr || descriptor->level != level) {
-            continue;
-        }
-
-        const Status status = descriptor->probe != nullptr
-                                  ? descriptor->probe(device, device.driver_data())
-                                  : Status::Error;
-        if(status == Status::Ok) {
-            bind_device(*descriptor, device, device.driver_data());
-        } else {
-            device.set_status(device::Status::Failed);
-            LOG_WARN("driver: {} deferred and failed again, giving up", descriptor->name);
-        }
-        log_probe(*descriptor, device);
     }
 }
 

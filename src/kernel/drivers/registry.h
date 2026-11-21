@@ -32,33 +32,17 @@ enum class InitLevel : uint8_t {
     Late,
 };
 
-enum class Status : uint8_t {
-    Ok,
-    Deferred,
-    Error,
-};
+// Alignment guaranteed by the private-state arena. Drivers that construct
+// their object there should assert that its alignment fits this contract.
+constexpr inline size_t PRIVATE_STATE_ALIGN = 16;
 
 // `priv` is the driver's zero-initialised state block (or nullptr when
 // priv_size is zero), aligned to 16 bytes -- the fundamental alignment. A
 // driver whose state is over-aligned must allocate that storage itself and
-// keep only a pointer here. Returning Deferred asks the core to retry after the
-// rest of the level has run.
-using Probe = Status (*)(device::Device& device, void* priv) noexcept;
-
-// What kind of device a driver binds, declared in the driver table.
-//
-// This is the device's own statement about itself: the core wires a bound device
-// from the declaration alone, without asking the driver through a callback. A
-// driver that names a type must lay its state block out accordingly -- the
-// type's interface has to be its first base, so `void* priv` already points at
-// the interface -- and the driver asserts that layout when it binds.
-enum class Type : uint8_t {
-    // No subsystem to join: probe() does everything the device needs.
-    Plain,
-    // A console: a CharDevice. After a successful probe the core hands the
-    // state block to console::attach() as the console's sink and input source.
-    Console,
-};
+// keep only a pointer here. Probe constructs and initialises an object, then
+// returns it on success, or nullptr on failure. The object and its interfaces
+// must live for the rest of the kernel; the core discovers and attaches them.
+using Probe = device::Object* (*)(device::Device & device, void* priv) noexcept;
 
 struct descriptor {
     const char* name;
@@ -67,9 +51,6 @@ struct descriptor {
     int priority;        // larger wins, so a specific driver can outrank a generic one
     uint32_t priv_size;  // 0 means no private state; the core passes nullptr
     Probe probe;
-    // What the bound device is; the core wires it by this declaration. Plain is
-    // the default because most drivers join no subsystem.
-    Type type = Type::Plain;
 };
 
 // Every driver in the image, in registration order. Implemented by
@@ -81,8 +62,7 @@ struct descriptor {
 [[nodiscard]] const descriptor* match(const device::Device& device) noexcept;
 
 // Probe every unbound device whose best match belongs to `level`, in
-// (priority descending, registration order) order. Deferred devices are retried
-// once when the level ends.
+// (priority descending, registration order) order. Each device is probed once.
 void probe(InitLevel level, std::span<device::Device> devices) noexcept;
 
 // probe() at each level in order: Core, Device, Late.
@@ -93,7 +73,7 @@ void probe_all(std::span<device::Device> devices) noexcept;
 // One line per driver in drivers/table.cc: expands to a braced initialiser for
 // that file's `constinit const descriptor kDrivers[]`, so it must appear inside
 // the array's initialiser list.
-#define SEELE_DRIVER(tag, match, level, priority, priv_size, probe, type)                          \
+#define SEELE_DRIVER(tag, match, level, priority, priv_size, probe)                                \
     ::driver::descriptor {                                                                         \
-        #tag, match, level, priority, priv_size, probe, type                                       \
+        #tag, match, level, priority, priv_size, probe                                             \
     }

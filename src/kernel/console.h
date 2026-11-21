@@ -247,9 +247,8 @@ enum class Level : uint8_t {
 };
 
 // Make `device` the console's character device: the sink output goes through and
-// the source read() blocks on. Called by the driver core once a driver that
-// declares driver::Type::Console has bound (drivers/registry.h); the declaration
-// is what tells the core the state block is a CharDevice.
+// the source read() blocks on. Called by the driver core when the object
+// returned by probe exposes CharDevice through device::dyn_cast.
 //
 // Attaching twice replaces the device, which is how the early console hands over
 // to the full driver; the old one is flushed first, so the handover cannot

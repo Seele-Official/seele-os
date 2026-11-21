@@ -24,17 +24,15 @@ constinit const driver::descriptor kDrivers[] = {
                  driver::InitLevel::Core,
                  0,
                  drivers::irq::kPrivSize,
-                 drivers::irq::probe,
-                 driver::Type::Plain),
-    // The UART is also the console: it declares that, and the core installs the
-    // bound object as the console's character device.
+                 drivers::irq::probe),
+    // The core discovers the returned object's character-device interface and
+    // installs it as the console.
     SEELE_DRIVER(ns16550,
                  drivers::uart::kMatch,
                  driver::InitLevel::Device,
                  0,
                  drivers::uart::kPrivSize,
-                 drivers::uart::probe,
-                 driver::Type::Console),
+                 drivers::uart::probe),
 };
 
 }  // namespace

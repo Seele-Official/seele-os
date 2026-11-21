@@ -64,8 +64,9 @@ extern "C" void tvec();
 // controller has at least one pending source. Two sides meet here:
 //
 //   - the interrupt controller driver (drivers/irq) owns claim/complete and
-//     source enabling. Its Core probe installs itself with
-//     set_external_controller(), and the trap path calls it on EXT_INT.
+//     source enabling. The core discovers ExternalController on the object
+//     returned by its Core probe and installs it with set_external_controller();
+//     the trap path calls it on EXT_INT.
 //   - a device driver owns one interrupt source. It registers itself in the
 //     table with register_external_handler(); once the controller has claimed
 //     a source, it calls dispatch_external_handler(irq) and the table entry for
@@ -132,8 +133,8 @@ protected:
     ~ExternalController() = default;
 };
 
-// Install the controller. Called once by the controller's probe; the reference
-// must outlive the kernel.
+// Install the controller. Called by the driver core after a successful probe;
+// the reference must outlive the kernel.
 void set_external_controller(ExternalController& controller) noexcept;
 
 // Register `handler` for `irq` and ask the installed controller to enable the

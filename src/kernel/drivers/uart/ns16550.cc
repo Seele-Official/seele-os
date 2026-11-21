@@ -511,18 +511,18 @@ uint8_t Ns16550::read(uint32_t index) const noexcept {
     return m_region.read<uint8_t>(offset(index));
 }
 
-driver::Status probe(device::Device& device, void* priv) noexcept {
+device::Object* probe(device::Device& device, void* priv) noexcept {
     if(priv == nullptr) {
-        return driver::Status::Error;
+        return nullptr;
     }
 
     const device::resource* resource = device.find_resource(device::ResourceType::Mmio, 0);
     if(resource == nullptr) {
-        return driver::Status::Error;
+        return nullptr;
     }
     const std::optional<mmio::Region> region = mmio::map(*resource);
     if(!region.has_value()) {
-        return driver::Status::Error;
+        return nullptr;
     }
 
     // Generic 16550 bindings. Values the driver cannot honour are replaced with
@@ -541,13 +541,6 @@ driver::Status probe(device::Device& device, void* priv) noexcept {
     // The probe owns the placement new: the driver core only hands over a
     // zeroed, aligned block.
     auto* self = ::new (priv) Ns16550{*region};
-    // The core installs this object as the console from the declared
-    // driver::Type::Console, casting the raw block to CharDevice*. That is only
-    // correct while the interface is the first base and therefore at offset 0,
-    // so the layout is checked here rather than trusted.
-    SEELE_ASSERT(reinterpret_cast<uintptr_t>(static_cast<CharDevice*>(self)) ==
-                     reinterpret_cast<uintptr_t>(priv),
-                 "uart: CharDevice is not the first base of the device");
     self->init(clock, shift, width);
 
     // The interrupt path is best effort. A device with no `interrupts`
@@ -563,15 +556,15 @@ driver::Status probe(device::Device& device, void* priv) noexcept {
         self->enable_interrupts();
     }
 
-    // The core installs this object as the console after this returns Ok, using
-    // the capability below: the driver does not call into the console itself.
+    // The core discovers CharDevice on the returned object and attaches the
+    // console; the driver does not perform subsystem attachment itself.
     if(is_interrupt_driven) {
         LOG_DEBUG("uart: {} interrupt-driven, irq {}", device.name(), irq);
     } else {
         LOG_DEBUG("uart: {} polled, no usable interrupt line", device.name());
     }
 
-    return driver::Status::Ok;
+    return self;
 }
 
 }  // namespace drivers::uart

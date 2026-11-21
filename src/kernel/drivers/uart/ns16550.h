@@ -10,10 +10,9 @@
 // arrive as properties decoded by device::Device, and the registers themselves
 // are reached through mmio::Region.
 //
-// The driver also declares driver::Type::Console in the driver table. That
-// declaration is what makes the core install the bound object as the console's
-// character device, which only works because `CharDevice` is the first base of
-// this class -- probe() asserts that layout.
+// Probe returns this object through device::Object. The core discovers its
+// CharDevice interface with dyn_cast and installs it as the console; interface
+// addresses are adjusted by C++, with no dependency on base-class order.
 //
 // Two modes share the same register programming:
 //
@@ -83,7 +82,7 @@ constexpr const inline char* kMatch[] = {"ns16550a", "ns16550", nullptr};
 constexpr inline uint32_t kTxCapacity = 128;
 constexpr inline uint32_t kRxCapacity = 64;
 
-class Ns16550 final : public CharDevice, public trap::ExternalHandler {
+class Ns16550 final : public device::Implements<CharDevice, trap::ExternalHandler> {
 public:
     explicit Ns16550(mmio::Region region) noexcept : m_region(region) {}
 
@@ -233,19 +232,18 @@ private:
 
 // Private state the driver core reserves for this driver. `Ns16550` holds the
 // mmio::Region, the programming parameters, the lock and both queues, so the
-// descriptor's priv_size is exactly its size; the core placement-news the
+// descriptor's priv_size is exactly its size; probe placement-news the
 // object into that storage.
 constexpr inline uint32_t kPrivSize = sizeof(Ns16550);
+static_assert(alignof(Ns16550) <= driver::PRIVATE_STATE_ALIGN);
 
 // Device level: the UART driver takes over the console from the early firmware
 // console (src/kernel/early) once the driver core is running. When the device
 // describes an interrupt line and the trap layer accepts it, the driver runs
 // interrupt-driven; otherwise it stays polled.
 //
-// The driver table declares this device as driver::Type::Console, so the core
-// installs the bound object as the console's character device. probe() therefore
-// does not call into the console itself; it only asserts the base-class layout
-// the core's cast relies on.
-driver::Status probe(device::Device& device, void* priv) noexcept;
+// The core discovers CharDevice on the returned object and installs it as the
+// console. Probe only initialises the device and registers its interrupt line.
+device::Object* probe(device::Device& device, void* priv) noexcept;
 
 }  // namespace drivers::uart

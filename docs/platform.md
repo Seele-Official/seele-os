@@ -82,8 +82,10 @@ reservation 终止符；缺少终止符时可能把 blob 内其他内容当作 r
 - `Mmio`：物理基址和长度。
 - `Irq`：控制器设备 id、source number 和 trigger；trigger 为 0 表示未知。
 
-`Device` 提供 compatible 匹配、资源查找、属性访问、probe 状态和 `driver_data`。
-它只存节点表下标，FDT 句柄、设备和资源均由
+`Device` 提供 compatible 匹配、资源查找、属性访问、probe 状态和 `object()`。
+固件描述与驱动对象分离：即使没有驱动，固件设备仍存在；成功 probe 后才借用一个
+`device::Object*`，而不是将原始私有状态当作接口。
+对于固件节点，`Device` 只保存节点表下标，FDT 句柄、设备和资源均由
 [device.cc](../src/kernel/platform/device.cc) 的静态数组持有；设备 id 是 `device::all()` 下标。
 
 枚举先收集候选并核对容量，再创建全部设备，最后解码资源，以便 IRQ 能引用控制器设备 id：
@@ -108,18 +110,32 @@ CPU 的裸地址 `reg` 不由 MMIO iterator 处理；启动发现另行解码它
 
 - probe 级别为 `Core → Device → Late`，级别内按 priority 降序、注册顺序执行。
 - 最佳匹配在**全部描述符**中选择：priority 最大者优先，同值取注册靠前者；只有它能对
-  `Unbound` 设备 probe。失败后不自动尝试另一个驱动。
-- `Deferred` 在所属级别末尾使用原私有状态重试一次；再次非成功即 `Failed`。
+  `Unbound` 设备 probe。每次仅调用一次；失败标记为 `Failed`，不重试，也不自动尝试另一个驱动。
+- probe 返回 `device::Object*`：成功返回已构造、初始化好的对象，失败返回 `nullptr`。
+  固件设备通过 `object()` / `set_object()` 保存类型化的借用指针；只有成功对象才能挂接子系统。
 - `priv_size > 0` 从 1 KiB、16 字节对齐的静态 bump arena 取零初始化存储，否则传
-  `nullptr`。arena 不回收（包括失败 probe），用尽时告警并标记设备失败；probe 当前仅在
-  boot hart、secondary 释放前运行，不提供并发注册/分配保护。
-- `Type::Console` 在成功 probe 和成功重试后均由核心调用 `console::attach()`。
-  **状态块起始地址必须就是 `CharDevice` 子对象地址**；Ns16550 在 probe 中断言检查。
-  其他类型为 `Plain`，没有额外挂接操作。
+  `nullptr`。驱动负责 placement new；需要更高对齐的存储须另行安排。arena 不回收（包括失败
+  probe），用尽时告警并标记设备失败；probe 当前仅在 boot hart、secondary 释放前运行，
+  不提供并发注册/分配保护。
+- 核心对返回对象逐项查询 `trap::ExternalController` 和 `CharDevice`，分别调用
+  `trap::set_external_controller()` 和 `console::attach()`；查询不是互斥分支，一个对象可提供
+  多个接口。控制器在 Core 级挂接完成后，Device 级 UART 才能按 IRQ 注册自己的 handler。
+
+### 驱动对象与轻量接口查询
+
+[device_object.h](../src/kernel/device_object.h) 定义抽象基类 `device::Object`、
+`device::Implements<Interfaces...>` 和 `device::dyn_cast<T>()`。具体驱动继承 `Implements`
+声明提供的接口；`dyn_cast` 对空对象或未实现的接口返回 `nullptr`，const 对象只返回 const 接口。
+
+类型身份使用每个接口对应的模板 inline 字节变量地址，不依赖 RTTI，也没有中央设备类型枚举。
+`Implements` 先通过 C++ `static_cast` 取得正确调整过的接口指针，再交给查询调用方；因此
+`Object`、接口子对象和 arena 存储的地址无须相同，也没有“接口必须为第一个基类”的布局约定。
+核心只识别公共接口，不识别 PLIC 或 Ns16550 等具体类。对象基类和接口均不提供通过基类删除的
+路径；arena 对象和子系统借用的接口指针必须存活到内核结束。
 
 当前只有 PLIC 和 Ns16550 两个 descriptor。新增驱动需增加实现、驱动表项和构建源文件，
-并核对 arena 容量、对齐、probe 顺序及失败/重试后的资源状态。early console 不属于
-probe 级别，不能依赖设备枚举、arena 或 console 锁。
+并核对 arena 容量、对齐、probe 顺序及失败后的资源状态。early console 不属于 probe 级别，
+不能依赖设备枚举、arena 或 console 锁。
 
 ## MMIO 访问契约
 
@@ -143,7 +159,8 @@ probe 级别，不能依赖设备枚举、arena 或 console 锁。
 - 设备实现 `ExternalHandler::handle(irq)`，负责服务并消除设备中断条件。
 - trap 仅借用对象指针；对象由驱动在私有存储中构造，必须活到内核结束。
 
-Core 级 probe 通过 `set_external_controller()` 安装控制器。设备随后调用
+Core 级 probe 返回控制器对象后，由驱动核心查询接口并通过 `set_external_controller()` 安装。
+设备随后调用
 `register_external_handler()`；irq 为 0、重复、表满、无控制器或 `enable()` 失败均返回
 `false`，不保留新表项。priority 为 0 表示登记但屏蔽。
 
@@ -158,7 +175,7 @@ handler 运行于中断关闭的 trap 上下文，不能睡眠；尤其 UART han
 ### 当前 PLIC 实现
 
 [plic.cc](../src/kernel/drivers/irq/plic.cc) 取第一个 MMIO 资源，验证窗口能覆盖所用 context
-及 `riscv,ndev` 的范围，清空该 context 的 enable 位图、设 threshold 为 0，再安装自身。
+及 `riscv,ndev` 的范围，清空该 context 的 enable 位图、设 threshold 为 0，再返回对象供核心挂接。
 `enable()` 写 source priority 并据其是否为 0 开关 enable 位；`handle()` 循环 claim/dispatch/
 complete，最多服务 source 数量次，避免单个持续中断源无限占据本次 trap。
 
@@ -180,8 +197,9 @@ controller id 或 trigger 做路由/编程。非 QEMU 布局、多控制器或�
 指针为空时输出被丢弃，`read()` panic。`read()` 只查找设备并转发，**不持 console 锁等待**。
 `CharDevice` 的 protected 非虚析构函数禁止通过接口删除；设备没有销毁路径。
 
-`Type::Console` 是驱动级标记，不依据 `/chosen/stdout-path` 选择真实设备；多个匹配 UART
-依 probe 顺序依次替换，最后挂接者成为 console。接口要求实现输入，尚无纯输出 console 类型。
+成功 probe 返回的对象只要提供 `CharDevice`，就默认成为 console，不依据
+`/chosen/stdout-path` 选择真实设备；多个匹配 UART 依 probe 顺序依次替换，最后挂接者成为
+console。接口要求实现输入，尚无纯输出 console 类型。
 
 ### 输出与 panic 契约
 
