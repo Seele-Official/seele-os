@@ -82,14 +82,13 @@ static void free_boot_stack() noexcept {
     // can run the scheduler. A ready kernel thread replaces idle; idle resumes
     // only when no other thread is runnable.
     csrs(sie, csr::sie::SEIE | csr::sie::STIE);
-    csrs(sstatus, csr::sstatus::SIE);
+    intr_on();
     while(true) {
         riscv::wfi();
     }
 }
 
 extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
-    mycpu()->hartid = hartid;
 
     // cpuid was assigned by _entry, before any C++ ran: 0 is the boot hart,
     // the secondaries took the next values from the arrival-order counter.
@@ -97,7 +96,7 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
     // because firmware is free to hand out sparse or large ids.
     if(cpuid() == 0) {
         cxx_init();
-
+        mycpu()->hartid = hartid;
         // The tree reads the blob through its direct-map alias: the firmware
         // hands over a physical address, and only P2V() turns one into memory
         // the kernel can dereference.
@@ -176,7 +175,7 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
         // process. Its kernel threads use a private stack subtree while sharing
         // the kernel image, direct map and heap with the other harts.
         while(!started.load(std::memory_order_acquire)) {}
-
+        mycpu()->hartid = hartid;
         const Paddr pagetable = vm::k::create_process_pagetable();
 
         vm::k::enable(pagetable);

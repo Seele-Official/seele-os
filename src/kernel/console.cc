@@ -27,15 +27,16 @@ namespace {
 std::atomic<CharDevice*> g_device{nullptr};
 Spinlock g_lock{};
 
-// Latched by console::enter_panic() and never cleared. A writer reads it once,
-// before it takes the console lock, and then uses the polled path for the
-// whole line: the panic path must not depend on a lock or an interrupt, and
-// latching per line keeps the chunks of one line on a single path.
+// Latched by console::enter_panic() and never cleared. A writer checks it before
+// it takes the console lock and again once it owns it, then uses the polled path
+// for the whole line: the panic path must not depend on a lock or an interrupt,
+// and latching per line keeps the chunks of one line on a single path.
 //
 // The latch is published with release (the exchange is acq_rel) and read with
 // acquire: every hart that observes it must also observe the sink state the
 // first panic drained, and it must not start a normal line after the panic has
-// already taken over the device.
+// already taken over the device. The second check is what covers a writer that
+// was preempted between the first check and the lock acquisition.
 std::atomic<bool> g_panicking{false};
 
 // One staging chunk. Output is formatted into this buffer and handed to the
@@ -305,7 +306,13 @@ void vprint_impl(std::string_view fmt,
 
         TryLockGuard guard{g_lock};
         if(guard.locked()) {
-            writer out{false};
+            // The latch can be set between the check above and this
+            // acquisition (the writer may have been preempted in between).
+            // Re-read it under the lock: a line committed after a panic must
+            // use the polled path too, not the buffered one the panic just
+            // drained.
+            const bool is_polled = g_panicking.load(std::memory_order_acquire);
+            writer out{is_polled};
             vprint_common(fmt, args, newline, line, out);
             return;
         }
@@ -368,8 +375,16 @@ void flush() noexcept {
 
         TryLockGuard guard{g_lock};
         if(guard.locked()) {
+            // Same second check as vprint_impl(): a panic that latched between
+            // the load above and this acquisition must select the polled flush,
+            // which does not wait for a device lock the panic path may hold.
+            const bool is_polled = g_panicking.load(std::memory_order_acquire);
             if(CharDevice* device = g_device.load(std::memory_order_relaxed); device != nullptr) {
-                device->flush();
+                if(is_polled) {
+                    device->flush_polled();
+                } else {
+                    device->flush();
+                }
             }
             return;
         }
@@ -378,9 +393,9 @@ void flush() noexcept {
 }
 
 void enter_panic() noexcept {
-    // Tell the device before publishing the console latch. A writer that read the
-    // latch just before it was set then still finds the device's own latch set
-    // and takes the polled path instead of queueing bytes behind this drain. The
+    // Tell the device before publishing the console latch. A writer that checked
+    // the latch just before it was set then still finds the device's own latch
+    // set and takes the polled path instead of queueing bytes behind this drain. The
     // order also keeps the drain honest: it runs after the device has stopped
     // accepting queued output.
     CharDevice* const device = g_device.load(std::memory_order_acquire);

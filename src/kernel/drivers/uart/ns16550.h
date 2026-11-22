@@ -145,7 +145,9 @@ private:
     [[nodiscard]] uint8_t read(uint32_t index) const noexcept;
 
     // Program the interrupt enable register and remember its value, so
-    // re-enabling the transmitter cannot clear a bit the receiver needs.
+    // re-enabling the transmitter cannot clear a bit the receiver needs. Once
+    // the panic latch is set this only writes zero: a writer that was already in
+    // its critical section when enter_panic() ran cannot re-arm a source.
     void set_interrupt_enable(uint8_t bits) noexcept;
 
     // The body of write() with `m_lock` already held.
@@ -202,7 +204,13 @@ private:
     // once by probe() before the console is attached and then only read.
     bool m_is_interrupt_driven = false;
     bool m_tx_interrupt_enabled = false;
-    uint8_t m_ier = 0;
+
+    // The interrupt enable mask last programmed into IER. Atomic because
+    // enter_panic() masks the device without taking `m_lock` -- the panicking
+    // hart may hold it -- while a writer in its critical section can still be
+    // updating this value. set_interrupt_enable() re-checks m_panicking after
+    // its write, so the panic mask stays the final state in every interleaving.
+    std::atomic<uint8_t> m_ier{0};
     uint32_t m_tx_fifo_depth = 1;
     uint32_t m_rx_fifo_depth = 1;
 

@@ -23,12 +23,30 @@ namespace {
     return std::string_view{file.data() + slash + 1, file.size() - slash - 1};
 }
 
-// No interrupt is going to make a panicked hart useful again, so wait in the
-// lowest-power state available instead of spinning.
+// No interrupt is going to make a panicked hart useful again, so stop taking
+// them and wait in the lowest-power state available instead of spinning.
+// Clearing the per-source enables matters for more than tidiness: wfi is
+// allowed to return immediately while an enabled source is pending, so a hart
+// that parked with a pending timer would loop hot instead of sleeping.
 [[noreturn]] void park() noexcept {
+    riscv::intr_off();
+    riscv::csrw(riscv::registers::sie, 0);
     while(true) {
         riscv::wfi();
     }
+}
+
+// The first thing every panic entry does, before any output. Masking interrupts
+// keeps the report on this hart: with SIE set, the next timer or external
+// interrupt can preempt the panicking code into the trap path, which schedules
+// other threads and leaves this hart running them -- the panic would then be
+// interleaved with, or never finish, its own report. It also keeps the frame
+// chain that stacktrace::print() walks from being swapped out under the walk.
+// Latch the console's polled path only afterwards, so no part of the report can
+// still take a lock or depend on an interrupt.
+void begin_panic() noexcept {
+    riscv::intr_off();
+    console::enter_panic();
 }
 
 void print_position(const char* file, int line, const char* function) noexcept {
@@ -46,11 +64,10 @@ void print_position(const char* file, int line, const char* function) noexcept {
                                    const char* condition,
                                    std::string_view fmt,
                                    format_args args) noexcept {
-    // Latch the console's panic path first: from here on every line goes
-    // straight to the hardware by polling. That is what lets panic() print
-    // while it already holds the console lock or the UART lock, and why it never
-    // needs the scheduler or an interrupt.
-    console::enter_panic();
+    // From here on every line goes straight to the hardware by polling. That is
+    // what lets panic() print while it already holds the console lock or the
+    // UART lock, and why it never needs the scheduler or an interrupt.
+    begin_panic();
 
     print("panic: assertion failed: {}", condition != nullptr ? condition : "(null)");
     if(!fmt.empty()) {
@@ -67,7 +84,7 @@ void print_position(const char* file, int line, const char* function) noexcept {
 }  // namespace
 
 extern "C" [[noreturn]] void panic(const char* message) {
-    console::enter_panic();
+    begin_panic();
     println("panic: {}", message != nullptr ? message : "(null)");
     println("stack trace:");
     stacktrace::print();
@@ -75,7 +92,7 @@ extern "C" [[noreturn]] void panic(const char* message) {
 }
 
 void debug::vpanic(std::source_location location, std::string_view fmt, format_args args) noexcept {
-    console::enter_panic();
+    begin_panic();
     print("panic: ");
     vprintln(fmt, args);
     print_position(location.file_name(),

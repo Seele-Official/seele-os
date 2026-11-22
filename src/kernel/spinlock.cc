@@ -11,26 +11,28 @@ namespace {
 
 // Disable interrupts, remembering whether they were on. Only the outermost
 // push_off() captures the state, so nested critical sections keep them off.
+// intr_save() reads and clears SIE in one CSR instruction, so no trap can run
+// between the capture and the disable.
 void push_off() noexcept {
     auto cpu = mycpu();
-    auto previous = riscv::csrrc(riscv::registers::sstatus, riscv::csr::sstatus::SIE);
+    const bool interrupts_were_on = riscv::intr_save();
     if(cpu->interrupt_depth == 0) {
-        cpu->interrupts_were_enabled = (previous & riscv::csr::sstatus::SIE) != 0;
+        cpu->interrupts_were_enabled = interrupts_were_on;
     }
 
     ++cpu->interrupt_depth;
 }
 
-// Undo one push_off(), re-enabling interrupts only when this hart holds no
-// other lock and they were enabled before the outermost one. An underflow means
-// unlock() ran without a matching lock(); the hart's interrupt bookkeeping is
-// already inconsistent, so report it instead of wrapping around.
+// Undo one push_off(), restoring the interrupt state the outermost lock found
+// only when this hart holds no other lock. An underflow means unlock() ran
+// without a matching lock(); the hart's interrupt bookkeeping is already
+// inconsistent, so report it instead of wrapping around.
 void pop_off() noexcept {
     auto cpu = mycpu();
     SEELE_ASSERT(cpu->interrupt_depth > 0);
     --cpu->interrupt_depth;
-    if(cpu->interrupt_depth == 0 && cpu->interrupts_were_enabled) {
-        riscv::csrs(riscv::registers::sstatus, riscv::csr::sstatus::SIE);
+    if(cpu->interrupt_depth == 0) {
+        riscv::intr_restore(cpu->interrupts_were_enabled);
     }
 }
 

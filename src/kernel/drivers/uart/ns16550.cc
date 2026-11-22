@@ -137,7 +137,7 @@ void Ns16550::enable_interrupts() noexcept {
     // masked again by service_transmit_locked() when the queue drains. OR the
     // bit in instead of overwriting: a later probe retry or a driver that turns
     // the transmitter on first must not lose it.
-    set_interrupt_enable(m_ier | IER_RX_READY);
+    set_interrupt_enable(m_ier.load(std::memory_order_relaxed) | IER_RX_READY);
 }
 
 void Ns16550::write(const char* data, std::size_t count) noexcept {
@@ -244,11 +244,12 @@ void Ns16550::enter_panic() noexcept {
     // Then mask the sources. An enabled receiver is level-triggered, so leaving
     // it on would make the controller re-claim the line as fast as the trap path
     // can complete it -- a storm on the hart that still takes interrupts, for as
-    // long as the kernel stays stopped. The register write is lock-free on
-    // purpose: the panicking hart may be the one holding `m_lock`, which is the
-    // same rule write_polled() follows.
-    m_ier = 0;
-    write(IER, 0);
+    // long as the kernel stays stopped. The mask is programmed without `m_lock`
+    // on purpose: the panicking hart may be the one holding it, which is the same
+    // rule write_polled() follows. set_interrupt_enable() re-checks the latch
+    // after its own write, so a writer already inside the critical section cannot
+    // leave a source enabled behind this call.
+    set_interrupt_enable(0);
 }
 
 std::optional<char> Ns16550::take_byte_locked() noexcept {
@@ -285,8 +286,7 @@ char Ns16550::read() noexcept {
     const cpu* hart = mycpu();
     SEELE_ASSERT(hart->current != nullptr, "uart: read() from a context without a thread");
     SEELE_ASSERT(hart->interrupt_depth == 0, "uart: read() while holding a spinlock");
-    SEELE_ASSERT((riscv::csrr(riscv::registers::sstatus) & riscv::csr::sstatus::SIE) != 0,
-                 "uart: read() with interrupts disabled");
+    SEELE_ASSERT(riscv::is_intr_on(), "uart: read() with interrupts disabled");
 
     // This reader must be on the hart that services the UART: shed::sleep() parks
     // it on THIS hart's sleeping list and wake() only scans that list, so a
@@ -318,7 +318,7 @@ char Ns16550::read() noexcept {
         // writer out only for the poll, not for the wait; the one path that
         // leaves it early -- the retry below -- re-enables interrupts first,
         // because nothing is registered for a wake-up yet.
-        riscv::csrc(riscv::registers::sstatus, riscv::csr::sstatus::SIE);
+        riscv::intr_off();
         {
             TryLockGuard guard{m_lock};
             if(!guard.locked()) {
@@ -330,7 +330,7 @@ char Ns16550::read() noexcept {
                 // wake-up this iteration could still miss. Nothing is published
                 // yet, so interrupts can be re-enabled for the retry instead of
                 // staying off for as long as the writer holds the lock.
-                riscv::csrs(riscv::registers::sstatus, riscv::csr::sstatus::SIE);
+                riscv::intr_on();
                 continue;
             }
             byte = take_byte_locked();
@@ -342,7 +342,7 @@ char Ns16550::read() noexcept {
         }
 
         if(byte.has_value()) {
-            riscv::csrs(riscv::registers::sstatus, riscv::csr::sstatus::SIE);
+            riscv::intr_on();
             return *byte;
         }
 
@@ -356,13 +356,13 @@ char Ns16550::read() noexcept {
             // sleep() switches with interrupts disabled and restores nothing;
             // the state read() was called with is re-established here (asserted
             // at the top: interrupts enabled).
-            riscv::csrs(riscv::registers::sstatus, riscv::csr::sstatus::SIE);
+            riscv::intr_on();
         } else {
             // A polled UART has no interrupt that could wake a sleeping thread,
             // so wait on the hart: the timer interrupt returns here and the next
             // iteration polls the receiver again. wfi parks only a hart whose
             // interrupts are enabled.
-            riscv::csrs(riscv::registers::sstatus, riscv::csr::sstatus::SIE);
+            riscv::intr_on();
             riscv::wfi();
         }
     }
@@ -410,8 +410,23 @@ void Ns16550::handle(uint32_t) noexcept {
 }
 
 void Ns16550::set_interrupt_enable(uint8_t bits) noexcept {
-    m_ier = bits;
+    // enter_panic() latches without `m_lock` (the panicking hart may hold it), so
+    // a writer already inside the critical section can arrive here after the
+    // latch was set. Do not re-arm the device then. The check after the write
+    // covers the opposite interleaving too: if the latch flips between the first
+    // check and the store, this write may have enabled a level-triggered source
+    // that enter_panic() just masked, and the second write masks it again. In
+    // every ordering the panic mask is the last value written to IER.
+    if(m_panicking.load(std::memory_order_acquire)) {
+        bits = 0;
+    }
+    m_ier.store(bits, std::memory_order_relaxed);
     write(IER, bits);
+
+    if(m_panicking.load(std::memory_order_acquire)) {
+        m_ier.store(0, std::memory_order_relaxed);
+        write(IER, 0);
+    }
 }
 
 void Ns16550::putc_polled(char c) noexcept {
@@ -430,7 +445,8 @@ void Ns16550::drain_transmit_polled() noexcept {
     // would otherwise fire as soon as the FIFO drains, just to mask itself.
     if(m_tx_interrupt_enabled) {
         m_tx_interrupt_enabled = false;
-        set_interrupt_enable(m_ier & static_cast<uint8_t>(~IER_TX_EMPTY));
+        set_interrupt_enable(m_ier.load(std::memory_order_relaxed) &
+                             static_cast<uint8_t>(~IER_TX_EMPTY));
     }
 }
 
@@ -439,7 +455,7 @@ void Ns16550::start_transmit_locked() noexcept {
         return;
     }
     m_tx_interrupt_enabled = true;
-    set_interrupt_enable(m_ier | IER_TX_EMPTY);
+    set_interrupt_enable(m_ier.load(std::memory_order_relaxed) | IER_TX_EMPTY);
 }
 
 uint32_t Ns16550::service_receive_locked() noexcept {
@@ -488,7 +504,8 @@ void Ns16550::service_transmit_locked() noexcept {
 
     if(transmit_count() == 0) {
         m_tx_interrupt_enabled = false;
-        set_interrupt_enable(m_ier & static_cast<uint8_t>(~IER_TX_EMPTY));
+        set_interrupt_enable(m_ier.load(std::memory_order_relaxed) &
+                             static_cast<uint8_t>(~IER_TX_EMPTY));
     }
 }
 

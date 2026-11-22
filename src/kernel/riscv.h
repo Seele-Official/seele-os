@@ -400,6 +400,39 @@ constexpr void write(csr_register<R>, uint64_t value) noexcept {
     asm volatile((format_staticstr("mv {}, %0", R)) : : "r"(value) : "memory");
 }
 
+// Global S-mode interrupt enable (sstatus.SIE): the one bit that decides
+// whether a pending source delegated to S-mode becomes a trap. intr_on() and
+// intr_off() are the plain toggles; is_intr_on() reports the current state and
+// changes nothing.
+inline void intr_on() noexcept {
+    csrs(registers::sstatus, csr::sstatus::SIE);
+}
+
+inline void intr_off() noexcept {
+    csrc(registers::sstatus, csr::sstatus::SIE);
+}
+
+// Disable S-mode interrupts and report whether they were enabled before, in a
+// single CSR instruction. The read-and-clear must not be split: a trap between
+// a separate is_intr_on() and intr_off() can run the scheduler and change the
+// state the caller meant to preserve. Pair it with intr_restore().
+[[nodiscard]] inline bool intr_save() noexcept {
+    return (csrrc(registers::sstatus, csr::sstatus::SIE) & csr::sstatus::SIE) != 0;
+}
+
+// Put sstatus.SIE back to the value intr_save() reported.
+inline void intr_restore(bool enabled) noexcept {
+    if(enabled) {
+        intr_on();
+    } else {
+        intr_off();
+    }
+}
+
+[[nodiscard]] inline bool is_intr_on() noexcept {
+    return (csrr(registers::sstatus) & csr::sstatus::SIE) != 0;
+}
+
 // Wait for an interrupt. wfi may return spuriously (and with every interrupt
 // disabled it can return immediately), so callers must loop around it.
 inline void wfi() noexcept {

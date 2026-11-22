@@ -161,7 +161,7 @@ void execute(const input_line& line) noexcept {
 [[noreturn]] void shell() {
     // A new thread is entered with interrupts disabled. Enable them before
     // using blocking console input and to allow normal interrupt preemption.
-    riscv::csrs(riscv::registers::sstatus, riscv::csr::sstatus::SIE);
+    riscv::intr_on();
 
     // The boot log went through the asynchronous console: it returns once the
     // sink has queued the bytes, not once the UART has shifted them out. Flush

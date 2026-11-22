@@ -10,10 +10,6 @@ using namespace riscv;
 using namespace riscv::registers;
 
 namespace {
-inline bool is_intr_off() noexcept {
-    return (csrr(sstatus) & csr::sstatus::SIE) == 0;
-}
-
 // Shared policy for preemption and voluntary sleep/yield. A sleeping thread
 // waits for wake(); otherwise the outgoing non-idle thread remains runnable.
 // Idle stays outside the ready queue and only runs when there is no ready work.
@@ -21,7 +17,7 @@ inline bool is_intr_off() noexcept {
 template <bool sleep>
 void helper() noexcept {
     auto* cpu = mycpu();
-    SEELE_ASSERT(is_intr_off(), "interruptible");
+    SEELE_ASSERT(!is_intr_on(), "interruptible");
     SEELE_ASSERT(cpu->interrupt_depth == 0, "spinlock");
     auto* current = cpu->current;
 

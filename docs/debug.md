@@ -34,7 +34,7 @@ stack trace:
   ...
 ```
 
-进入 panic 时，`console::enter_panic()` 先通知设备并尽力排出此前已接受的队列字节，随后改用 `write_polled()` / `flush_polled()`；panic 路径不依赖中断、调度或 console/设备锁，因此可从已持锁的代码、trap、中断和 `SIE=0` 的启动上下文报告。它只保证尽力输出：其他 hart 可能同时写入，字符可能交织，切换瞬间仍在格式化的行可能丢失。panic 不恢复执行；实现是在本 hart 上循环 `wfi`，其他 hart 不会因此自动停止。
+进入 panic 时，panic 入口先关闭本 hart 的 `sstatus.SIE`，再调用 `console::enter_panic()`。关中断必须先行：否则定时器或外部中断会在报告过程中进入 trap 并可能调度到其他线程，当前 hart 不会停下来，回溯的栈也可能在继续遍历时被切走。`console::enter_panic()` 先通知设备并尽力排出此前已接受的队列字节，随后所有输出改用 `write_polled()` / `flush_polled()`；普通写者在取得 console 锁后还会再次检查 panic 闩锁，因此不会在闩锁发布后启动新的排队输出。panic 路径不依赖中断、调度或 console/设备锁，因此可从已持锁的代码、trap、中断和 `SIE=0` 的启动上下文报告。它只保证尽力输出：其他 hart 可能同时写入，字符可能交织，切换瞬间仍在格式化的行可能丢失。panic 不恢复执行；实现是关闭本 hart 中断、清空 `sie` 后循环 `wfi`，其他 hart 不会因此自动停止。
 
 `abort()` 由 [libc](../src/libc/stdlib.cc) 转发为 `panic("abort() called")`。Debug 构建定义 `_GLIBCXX_ASSERTIONS`，freestanding libstdc++ 的前置条件失败可能只留下这条消息和栈，不一定带条件文本；`std::get()`、空 `optional/expected` 等失败也可能走同一路径。`std::unreachable()` 的工具链展开可能是 `ebreak`，而当前 `kerneltrap` 对未处理异常只记录后返回，故内核代码使用 `SEELE_UNREACHABLE()`。
 
