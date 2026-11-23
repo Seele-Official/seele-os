@@ -69,10 +69,9 @@ Allocator allocator;
 // True when the page [page, page + PGSIZE) intersects [base, base + size) for
 // any Reserved region. The end is saturated rather than computed, so a range
 // that reaches the top of the address space cannot wrap around.
-[[nodiscard]] bool overlaps_reserved(Paddr page, std::span<const boot::region> regions) noexcept {
-    for(const boot::region& region: regions) {
-        if(region.kind == boot::RegionKind::Reserved &&
-           page_overlaps(page, region.base, region.size)) {
+[[nodiscard]] bool overlaps_reserved(Paddr page, std::span<const phys_range> reserved) noexcept {
+    for(const phys_range& range: reserved) {
+        if(page_overlaps(page, range.base, range.size)) {
             return true;
         }
     }
@@ -87,14 +86,14 @@ struct pool_range {
     Paddr last;   // page aligned, exclusive
 };
 
-constexpr size_t MAX_POOL_RANGES = boot::MAX_REGIONS;
+constexpr size_t MAX_POOL_RANGES = platform::MAX_REGIONS;
 
 pool_range g_pool[MAX_POOL_RANGES];
 size_t g_pool_count = 0;
 
-// Reserved ranges sit inside a usable one (the DTB is inside RAM), so the pool
-// ranges alone cannot tell their pages apart.
-boot::region g_reserved[boot::MAX_REGIONS];
+// Reserved ranges sit inside usable RAM (e.g. the DTB), so the pool ranges
+// alone cannot tell their pages apart during free().
+phys_range g_reserved[platform::MAX_REGIONS];
 size_t g_reserved_count = 0;
 
 Paddr g_kernel_start = null_paddr();
@@ -140,46 +139,37 @@ void free(Paddr page) noexcept {
     allocator.push(page);
 }
 
-void init(std::span<const boot::region> regions) noexcept {
+void init(const platform::MemoryMap& memory) noexcept {
     // The linker symbols are addresses in the kernel's own address space, not
-    // physical addresses, while boot::region::base is physical. Converting the
-    // image bounds once here is what keeps the overlap test in one address
-    // space. It assumes the image is loaded at its link-time address inside the
-    // direct map, which is also what map_image() relies on: PAGE_OFFSET has to
-    // stay 0 until linker.ld and map_image() move together.
+    // physical addresses, while phys_range::base is physical. Converting the
+    // image bounds once here keeps the overlap test in one address space.
     g_kernel_start = vm::k::V2P(vaddr(vm::IMAGE.start));
     g_kernel_end = vm::k::V2P(vaddr(vm::IMAGE.end));
 
-    // The boot stack pool is also in use during init(): hart 0 runs on
-    // boot_stacks[0] and the secondaries on their own slices. It is skipped
-    // below so alloc() cannot hand out a page a hart is still standing on, but
-    // it is deliberately not added to g_reserved: each hart frees its slice
-    // after switching to its idle thread's kernel stack.
+    // The boot stack pool is also in use during init(): skipped here, and
+    // freed slice by slice when each hart enters idle().
     const Paddr stack_start = vm::k::V2P(vaddr(vm::BOOT_STACK.start));
     const Paddr stack_end = vm::k::V2P(vaddr(vm::BOOT_STACK.end));
 
-    // Keep the reserved ranges: free() has to reject their pages, and it runs
-    // long after the span the caller passed in is gone.
+    // Keep the reserved ranges so free() rejects them later.
     g_reserved_count = 0;
-    for(const boot::region& region: regions) {
-        if(region.kind == boot::RegionKind::Reserved && g_reserved_count < boot::MAX_REGIONS) {
-            g_reserved[g_reserved_count++] = region;
+    for(const phys_range& range: memory.reserved()) {
+        if(g_reserved_count < platform::MAX_REGIONS) {
+            g_reserved[g_reserved_count++] = range;
         }
     }
+    const std::span<const phys_range> reserved{g_reserved, g_reserved_count};
 
     size_t page_count = 0;
     size_t reserved_pages = 0;
     g_pool_count = 0;
 
-    for(const boot::region& region: regions) {
-        if(region.kind != boot::RegionKind::Usable || region.size == 0) {
+    for(const phys_range& region: memory.usable()) {
+        if(region.size == 0) {
             continue;
         }
 
         if(!range_fits(region.base, region.size)) {
-            // The region runs past the top of the address space, so no page in
-            // it can be addressed. boot::parse() drops such a region already;
-            // this is the same check, for a caller that built the list itself.
             continue;
         }
 
@@ -223,7 +213,7 @@ void init(std::span<const boot::region> regions) noexcept {
             // A page that touches a reserved range in any way is dropped whole:
             // handing out the rest of a page that contains, say, the tail of
             // the DTB would break the strings that point into it.
-            if(overlaps_reserved(page, std::span{g_reserved, g_reserved_count})) {
+            if(overlaps_reserved(page, reserved)) {
                 ++reserved_pages;
                 continue;
             }

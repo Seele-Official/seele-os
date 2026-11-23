@@ -310,8 +310,8 @@ void require_reserved_root(Vaddr va, uint64_t size) noexcept {
     return pte == nullptr ? 0 : (*pte & riscv::PTE_LEAF_MASK);
 }
 
-// A page-aligned physical range inside the direct map.
-struct phys_range {
+// A page-aligned physical span [begin, end) inside the direct map.
+struct page_span {
     Paddr begin;
     Paddr end;
 };
@@ -320,7 +320,7 @@ struct phys_range {
 // Returns std::nullopt when there is nothing to map. Over-covering a partial
 // page is harmless: the bytes around the range may be accessed through the same
 // page, and map_ranges() merges the result with its neighbours.
-[[nodiscard]] std::optional<phys_range> direct_range(Paddr base, uint64_t size) noexcept {
+[[nodiscard]] std::optional<page_span> direct_range(Paddr base, uint64_t size) noexcept {
     if(size == 0 || base >= DIRECT_MAP_END) {
         return std::nullopt;
     }
@@ -329,16 +329,16 @@ struct phys_range {
     }
     // The clamped end is inside the direct map, so rounding up cannot wrap and
     // the result always covers at least one page.
-    return phys_range{align_down(base), align_up(range_end(base, size))};
+    return page_span{align_down(base), align_up(range_end(base, size))};
 }
 
 // Map the union of `ranges` at its direct-map alias, read/write and
 // non-executable. Firmware describes the same memory more than once and in no
 // particular order, so sort and merge first. Insertion sort is enough for the
 // small fixed arrays below, and there is no heap.
-void map_ranges(std::span<phys_range> ranges) noexcept {
+void map_ranges(std::span<page_span> ranges) noexcept {
     for(size_t i = 1; i < ranges.size(); ++i) {
-        const phys_range key = ranges[i];
+        const page_span key = ranges[i];
         size_t j = i;
         while(j > 0 && ranges[j - 1].begin > key.begin) {
             ranges[j] = ranges[j - 1];
@@ -348,7 +348,7 @@ void map_ranges(std::span<phys_range> ranges) noexcept {
     }
 
     for(size_t i = 0; i < ranges.size(); ++i) {
-        phys_range merged = ranges[i];
+        page_span merged = ranges[i];
         while(i + 1 < ranges.size() && ranges[i + 1].begin <= merged.end) {
             if(ranges[i + 1].end > merged.end) {
                 merged.end = ranges[i + 1].end;
@@ -381,14 +381,11 @@ void map_image(riscv::PageTable* table, std::byte* begin, std::byte* end, uint64
     }
 }
 
-// Direct map every physical region the firmware described. Usable and Reserved
-// regions share the same RW/NX permission here; the distinction matters to
-// phymem (it must not hand reserved pages out), not to the address space.
-void map_physical_regions(std::span<const boot::region> regions) noexcept {
-    // boot::info caps region_count at MAX_REGIONS, so this always fits.
-    phys_range ranges[boot::MAX_REGIONS];
+// Direct map every physical range in `list` as RW/NX.
+void map_phys_list(std::span<const phys_range> list) noexcept {
+    page_span ranges[platform::MAX_REGIONS];
     size_t count = 0;
-    for(const boot::region& region: regions) {
+    for(const phys_range& region: list) {
         if(const auto range = direct_range(region.base, region.size)) {
             ranges[count++] = *range;
         }
@@ -396,23 +393,20 @@ void map_physical_regions(std::span<const boot::region> regions) noexcept {
     map_ranges(std::span{ranges, count});
 }
 
-// Map every MMIO resource read/write and non-executable.
-//
-// Device ranges come from the platform bus in tree order, which is not address
-// order and may repeat a range (a device node can describe the same window
-// twice), so map_ranges() sorts and merges them. A page the direct-map pass
-// already mapped is left alone by map_pages<true>.
+// Direct map every usable and reserved physical range firmware described.
+void map_physical_memory(const platform::MemoryMap& memory) noexcept {
+    map_phys_list(memory.usable());
+    map_phys_list(memory.reserved());
+}
+
+// Map every device MMIO window read/write and non-executable.
 void map_devices(std::span<const device::Device> devices) noexcept {
-    // device::enumerate() caps the total resource count at MAX_RESOURCES, so
-    // this always fits.
-    phys_range ranges[device::MAX_RESOURCES];
+    page_span ranges[device::MAX_RESOURCES];
     size_t count = 0;
     for(const device::Device& entry: devices) {
-        for(const device::resource& resource: entry.resources()) {
-            if(resource.type == device::ResourceType::Mmio) {
-                if(const auto range = direct_range(resource.mmio.base, resource.mmio.size)) {
-                    ranges[count++] = *range;
-                }
+        for(const phys_range& mmio: entry.mmios()) {
+            if(const auto range = direct_range(mmio.base, mmio.size)) {
+                ranges[count++] = *range;
             }
         }
     }
@@ -421,7 +415,7 @@ void map_devices(std::span<const device::Device> devices) noexcept {
 
 }  // namespace
 
-void init(std::span<boot::region> regions, std::span<device::Device> devices) {
+void init(const platform::MemoryMap& memory, std::span<const device::Device> devices) {
     // The single shared root page table every hart loads into satp. Its page
     // comes from phymem and must be cleared before walk() links the first
     // level-1 table into it.
@@ -453,7 +447,7 @@ void init(std::span<boot::region> regions, std::span<device::Device> devices) {
     // aligned and a whole number of pages, which is what map_image() requires.
     map_image(k_pagetable, vm::BOOT_STACK.start, vm::BOOT_STACK.end, PTE_KERNEL_RW);
 
-    map_physical_regions(regions);
+    map_physical_memory(memory);
     map_devices(devices);
 
     // One entry per heap arena becomes final here: link a fresh empty level-1

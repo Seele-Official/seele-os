@@ -1,7 +1,6 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <span>
 #include <string.h>
 
 #include "console.h"
@@ -9,14 +8,12 @@
 #include "panic.h"
 #include "riscv.h"
 #include "trap.h"
-#include "boot/info.h"
 #include "boot/stack.h"
 #include "drivers/registry.h"
-#include "early/firmware.h"
-#include "fdt/fdt.h"
 #include "mm/kalloc.h"
 #include "mm/vm.h"
 #include "platform/device.h"
+#include "platform/platform.h"
 #include "proc/process.h"
 #include "proc/shell.h"
 #include "shed/switch.h"
@@ -45,12 +42,6 @@ void cxx_init() {
 // zero .bss. On QEMU the loader does zero it, so this is belt and suspenders,
 // not a fix for an observed failure.
 constinit static std::atomic<bool> started __attribute__((section(".data"))) = false;
-
-// The tree the rest of the kernel sees. Static rather than a local: `Device`
-// keeps node handles into it and `Device::name()` points into the blob, so the
-// tree must outlive every use. It is assigned after clear_bss(), which is why
-// it cannot be a constinit object.
-static fdt::Tree tree;
 
 // Called from idle() only after switching to that thread's kernel stack; the
 // abandoned boot context must never resume after these pages are released.
@@ -97,47 +88,24 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
     if(cpuid() == 0) {
         cxx_init();
         mycpu()->hartid = hartid;
-        // The tree reads the blob through its direct-map alias: the firmware
-        // hands over a physical address, and only P2V() turns one into memory
-        // the kernel can dereference.
-        tree = fdt::Tree{to_pointer<const std::byte>(vm::k::P2V(dtb))};
 
-        // Attach a polling console before discovery can emit diagnostics.
-        // Failure is nonfatal: output is dropped until a later driver attaches
-        // a console, if one can be probed.
-        (void)early::attach_console(tree);
-
-        SEELE_ASSERT(tree.valid(), "fdt: invalid device tree, no devices discovered");
-        // Enumerate before parsing, so a discovery warning reaches the console
-        // that is already attached (when there is one; a missing sink just
-        // drops the line, it never fails the boot).
-        device::enumerate(tree);
+        // Bind the firmware DTB, bring up the early console if available,
+        // enumerate devices, and discover memory/hart topology.
+        const platform::Info& plat = platform::init(dtb, hartid);
 
         LOG_INFO("boot: hart {} cpuid {} dtb {:#018x}", hartid, cpuid(), to_uint64(dtb));
         LOG_DEBUG("boot: sstatus={:#018x}", riscv::csrr(sstatus));
+        LOG_DEBUG("boot: timebase={:#x}", plat.timebase_frequency());
 
-        boot::info info = boot::parse(tree, dtb);
-
-        // The FDT describes the harts but not which one the firmware booted;
-        // the hart running kmain is the boot hart by definition.
-        for(size_t i = 0; i < info.hart_count; ++i) {
-            if(info.harts[i].hartid == hartid) {
-                info.harts[i].boot = true;
-                break;
-            }
-        }
-
-        LOG_DEBUG("boot: timebase={:#x}", info.timebase_frequency);
-
-        // Build the physical page allocator's free list from boot::info. The
-        // DTB is one of the Reserved regions, so the pages the strings above
-        // point into never leave the pool.
-        phymem::init(std::span{info.regions, info.region_count});
+        // Build the physical page allocator's free list from platform::MemoryMap.
+        // The DTB is recorded in reserved(), so every borrowed string_view stays
+        // backed for the kernel's lifetime.
+        phymem::init(plat.memory());
         LOG_INFO("phymem: initialized");
 
         // Build the shared kernel mappings before creating the system process's
         // root. Every process root reuses these direct-map and heap subtrees.
-        vm::k::init(std::span{info.regions, info.region_count}, device::all());
+        vm::k::init(plat.memory(), device::all());
 
         // Build the process's own root page table before paging is on. It copies
         // the kernel root entries that vm::k::init() froze, so the new table sees
@@ -163,9 +131,9 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
         driver::probe_all(device::all());
 
         // Shell is another kernel thread in the system process, not a separate
-        // process. Queue it only when a console is attached; otherwise this
-        // hart can still enter idle without an interactive shell.
-        if(console::attached()) {
+        // process. Queue it only when a readable console device is attached; an
+        // output-only early sink leaves this hart running idle silently.
+        if(console::can_read()) {
             mycpu()->ready.push_back(proc::make_thread(mycpu()->system, &proc::shell));
         }
 

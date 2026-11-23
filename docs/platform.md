@@ -8,68 +8,68 @@
 
 boot hart 在 [kmain.cc](../src/kernel/kmain.cc) 中按以下顺序初始化：
 
-1. 清 `.bss`、执行 `.init_array`，用 DTB 的 direct-map 地址构造文件级 `static fdt::Tree`。
-2. `early::attach_console(tree)` 尽力挂接轮询 console；随后断言树有效。
-3. `device::enumerate(tree)` 生成设备资源；`boot::parse(tree, dtb)` 收集内存、hart、timebase 和 `/chosen` 信息。
-4. 初始化物理分配器、共享内核映射及 MMIO 映射，创建并启用进程页表，再创建 idle 进程/线程。
-5. `driver::probe_all()` 依次运行 Core、Device、Late；当前分别由 Core 级 PLIC 和 Device 级 Ns16550 提供中断与 console。
-6. 仅在已有 console 时创建 shell，随后以 `started.store(..., release)` 发布初始化结果。
+1. 清 `.bss`、执行 `.init_array`，调用 `platform::init(dtb, hartid)`：
+    - 用 DTB 的 direct-map 地址在 [platform.cc](../src/kernel/platform/platform.cc) 静态存储中构造 `fdt::Tree`，随后调用 `platform::attach_early_console()` 尽力挂接纯输出轮询 sink，再断言树有效。
+    - 调用 `device::enumerate()` 生成设备资源，并构建 `platform::MemoryMap`（分离的 `usable()` / `reserved()`）、hart 硬件描述、`boot_hartid`、timebase 和 `/chosen/bootargs`，存入只读的 `platform::Info`。
+2. 初始化物理分配器、共享内核映射及 MMIO 映射，创建并启用进程页表，再创建 idle 进程/线程。
+3. `driver::probe_all()` 依次运行 Core、Device、Late；当前分别由 Core 级 PLIC 和 Device 级 Ns16550 提供中断与 console。
+4. 仅在 `console::can_read()` 为真（已挂接支持输入的 `CharDevice`）时创建 shell，随后以 `started.store(..., release)` 发布初始化结果。
 
 secondary 以 acquire 等待 `started`，不重复平台发现或驱动 probe，只建立自己的进程页表和 idle。各 hart 进入 idle 后才安装 `stvec` 并开启定时器和外部中断。
 
-**生命周期契约：**设备节点句柄依赖 `Tree`，名字和属性视图依赖 DTB；两者都必须长期有效。`boot::parse()` 优先将 DTB 自身记为 `Reserved`，避免其页被物理分配器回收。
+**生命周期契约：**设备节点偏移依赖 `platform.cc` 持有的静态 `fdt::Tree`，名字和属性视图依赖 DTB；两者都必须长期有效。`platform::init()` 优先将 DTB 自身记入 `MemoryMap::reserved()`，避免其页被物理分配器回收。
 
 ## FDT 与启动发现
 
 ### FDT 字节与查询层
 
-[fdt.h](../src/kernel/fdt/fdt.h)、[reader.cc](../src/kernel/fdt/reader.cc) 和 [tree.cc](../src/kernel/fdt/tree.cc) 提供无分配、只读查询，不负责设备绑定或资源策略。
+[fdt.h](../src/kernel/fdt/fdt.h) 和 [fdt.cc](../src/kernel/fdt/fdt.cc) 提供无分配、只读查询，不负责设备绑定或资源策略。
 
 - 构造时检查 magic、`totalsize`（最大 16 MiB）、版本 17、`last_comp_version <= 17`、结构块/字符串块边界及根节点起始 token。无效树返回空查询结果；**内核启动仍要求树有效**。
-- `u32()` / `u64()` 要求属性长度精确匹配；`string()` 取首个 NUL 结尾字符串；`boolean()` 仅判断属性存在。
-- `find()` 只接受绝对路径，路径分量可省略 unit address；不解析 `/aliases`。`by_phandle()` 遍历查找，`phandle` 优先于 `linux,phandle`。
+- `u32()` / `u64()` 要求属性长度精确匹配；`u32_or_u64()` 接受 4 或 8 字节大端整数；`string()` 取首个 NUL 结尾字符串，`strings()` 提供 range-for 遍历；`boolean()` 仅判断属性存在。
+- `find()` 只接受绝对路径，路径分量可省略 unit address；不解析 `/aliases`。`walk()` 非递归前序遍历结构块、统一受 `fdt::MAX_DEPTH`（`SEELE_FDT_MAX_DEPTH`）约束，并向回调传递当前祖先链 `std::span<const Node>` 以避免遍历中重复回溯父节点；`by_phandle()` 基于 `walk()` 查找，`phandle` 优先于 `linux,phandle`。
 - `enabled()` 只检查该节点自己的 `status`：缺省、`okay`、`ok` 为可用；并不继承父节点状态。
-- `cells()` 沿父链查找 `#address-cells` / `#size-cells`，默认 2/2；`RegIterator` 只支持地址和大小分别为 1 或 2 个 cell，跳过长度为 0 的范围。`#size-cells = 0` 不属于其支持范围。
-- reservation iterator 从 `off_mem_rsvmap` 读取大端 `(address, size)`，遇 `(0,0)` 结束；没有可用 reservation offset 时为空。
+- `Node::cells()` / `Node::regs()` 支持直接沿 `walk()` 提供的祖先链或沿父链解析 `#address-cells` / `#size-cells`（默认 2/2），返回统一的 `phys_range` 序列，只支持地址和大小分别为 1 或 2 个 cell，跳过长度为 0 的范围。`#size-cells = 0` 的节点（如 `/cpus/cpu@N`）使用 `Node::reg_address()` 解码首地址。
+- `Tree::reserved_regions()` 从 `off_mem_rsvmap` 提供大端 `phys_range` 的 range-for 遍历，遇 `(0,0)` 结束；没有可用 reservation offset 时为空。
 
 **解析边界：**这是基于 blob 声明长度的边界检查，不是完整的固件验证器。调用者必须提供可读的 blob；构造器在知道长度前先读取头部的前 8 字节。实现不完整验证块间关系或 reservation 终止符；缺少终止符时可能把 blob 内其他内容当作 reservation。`reg` 不做总线 `ranges` 地址转换，平台当前直接将其地址视作物理地址。
 
 ### 启动发现结果
 
-接口与实现见 [boot/info.h](../src/kernel/boot/info.h)、[fdt_boot.cc](../src/kernel/boot/fdt_boot.cc)。`boot::info` 使用固定容量数组保存：
+接口与实现见 [platform/platform.h](../src/kernel/platform/platform.h)、[platform/platform.cc](../src/kernel/platform/platform.cc)。`platform::Info` 静态持有只读拓扑，通过 `platform::info()` 在整个内核生命周期内访问：
 
-| 信息                      | 当前来源与处理                                                                                             |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `Usable` 区域             | 遍历 `device_type = "memory"` 节点的所有 `reg` bank                                                        |
-| `Reserved` 区域           | DTB 自身、memory reservation block、`/reserved-memory` 下 enabled 子节点的 `reg`、`linux,initrd-start/end` |
-| hart                      | `/cpus` 下 enabled 的 `cpu` 节点：单独解码 `reg` 首地址，记录 `riscv,isa`                                  |
-| `timebase_frequency`      | `/cpus/timebase-frequency`，缺失时尝试 root 同名属性                                                       |
-| `cmdline` / `stdout_path` | `/chosen/bootargs` 和 `stdout-path`，原样保留                                                              |
+| 信息                        | 当前来源与处理                                                                                                                       |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `MemoryMap::usable()`       | 遍历 `device_type = "memory"` 节点的所有 `reg` bank，按 base 排序并 O(N) 合并重叠/相邻区间                                           |
+| `MemoryMap::reserved()`     | DTB 自身、memory reservation block、`/reserved-memory` 下 enabled 子节点的 `reg`、`linux,initrd-start/end`，独立排序并合并           |
+| `harts()` / `boot_hartid()` | `/cpus` 下 enabled 的 `cpu` 节点：通过 `Node::reg_address()` 解码 hartid 与 `riscv,isa`；引导 hart 作为独立标量 `boot_hartid()` 保存 |
+| `timebase_frequency()`      | `/cpus/timebase-frequency`，缺失时尝试 root 同名属性                                                                                 |
+| `cmdline()`                 | `/chosen/bootargs`，原样保留                                                                                                         |
 
-内存区域按 base 排序，并跨整个结果表合并同 kind 的重叠/相邻范围；不同 kind 不合并，保留项由物理分配器从可用范围中扣除。区域回绕或容量溢出会告警并丢弃，不会自动扩容。内存树遍历受 `SEELE_FDT_MAX_DEPTH` 限制；区域和 hart 容量分别由 `SEELE_MAX_REGIONS`、`MAX_HARTS` 限制，构建参数见 [build.md](build.md)。
+`usable()` 与 `reserved()` 分别保存在容量为 `SEELE_MAX_REGIONS` 的独立数组中，保留项由物理分配器从可用范围中扣除。区域回绕或容量溢出会告警并丢弃，不会自动扩容。树遍历深度受 `SEELE_FDT_MAX_DEPTH` 限制；hart 容量受 `MAX_HARTS` 限制，构建参数见 [build.md](build.md)。
 
-`parse()` 不判断实际 boot hart；`kmain()` 按正在启动的 hartid 标记 `hart.boot`。发现 timebase 不等于调度器使用它计算 tick，见 [调度文档](scheduling.md#当前-kerneltrap-分发)。
+发现 timebase 不等于调度器使用它计算 tick，见 [调度文档](scheduling.md#当前-kerneltrap-分发)。
 
 ## 设备与驱动模型
 
 ### 设备枚举
 
-[device.h](../src/kernel/platform/device.h) 对外提供 `Device` 及两类资源：
+[device.h](../src/kernel/platform/device.h) 对外提供 `Device` 及两类强类型资源切片（不使用手写 union）：
 
-- `Mmio`：物理基址和长度。
-- `Irq`：控制器设备 id、source number 和 trigger；trigger 为 0 表示未知。
+- `mmios()` / `mmio(i)`：`phys_range`（物理基址和长度），O(1) 访问。
+- `irqs()` / `irq(i)`：`irq_line`（控制器设备 id、source number 和 trigger；trigger 为 0 表示未知），O(1) 访问。
 
-`Device` 提供 compatible 匹配、资源查找、属性访问、probe 状态和 `object()`。固件描述与驱动对象分离：即使没有驱动，固件设备仍存在；成功 probe 后才借用一个 `device::Object*`，而不是将原始私有状态当作接口。对于固件节点，`Device` 只保存节点表下标，FDT 句柄、设备和资源均由 [device.cc](../src/kernel/platform/device.cc) 的静态数组持有；设备 id 是 `device::all()` 下标。
+`Device` 提供 compatible 匹配、类型化资源切片、属性访问、probe 状态和 `object()`。固件描述与驱动对象分离：即使没有驱动，固件设备仍存在；成功 probe 后才借用一个 `device::Object*`。`Device` 仅保存结构块字节偏移 `m_fdt_offset`（不向驱动暴露 `fdt.h`），设备和资源池由 [device.cc](../src/kernel/platform/device.cc) 的静态数组持有；设备 id 是 `device::all()` 下标。
 
-枚举先收集候选并核对容量，再创建全部设备，最后解码资源，以便 IRQ 能引用控制器设备 id：
+枚举通过单遍 `tree.walk()`（利用祖先链 O(深度) 解析 `reg` 与 `interrupt-parent`）直接写入 MMIO/IRQ 资源池并创建设备，随后统一将 IRQ 资源的 `interrupt-parent` phandle 解析为控制器设备 id：
 
-- 从 root 深度优先遍历，跳过名为 `reserved-memory` 的子树；节点自身必须 enabled、compatible 非空且至少有一个资源才成为设备。普通 disabled 节点并不会阻止遍历其子节点。
+- 从 root 深度优先遍历，通过 `WalkAction::SkipChildren` 跳过名为 `reserved-memory` 的子树；节点自身必须 enabled、compatible 非空且至少有一个资源才成为设备。普通 disabled 节点并不会阻止遍历其子节点。
 - 每个受支持的非零长度 `reg` entry 产生一个 MMIO 资源；不进行总线地址转换。
-- `interrupts` 使用沿父链查找的 `interrupt-parent`，只接受控制器声明的 1 或 2 个 `#interrupt-cells`（source，或 source + trigger）。不支持 `interrupts-extended`。
+- `interrupts` 使用沿祖先链查找的 `interrupt-parent`，只接受控制器声明的 1 或 2 个 `#interrupt-cells`（source，或 source + trigger）。不支持 `interrupts-extended`。
 - parent phandle 在树中不存在、cell 数不支持或属性长度无效时，不生成 IRQ 资源；parent 节点存在但未成为 Device 时，保留 IRQ 资源并告警，`controller = UINT32_MAX`。
-- 达到设备/资源容量时丢弃整个候选节点，而非保留部分资源；遍历深度也有限制。
+- 达到设备/资源容量时回滚该节点已写入的 MMIO 与 IRQ 资源并丢弃整个候选节点，而非保留部分资源；遍历深度受 `fdt::MAX_DEPTH` 限制。
 
-QEMU virt 中的 serial、PLIC、CLINT、virtio-mmio 等可被枚举，但**枚举不代表已有驱动**。CPU 的裸地址 `reg` 不由 MMIO iterator 处理；启动发现另行解码它。
+QEMU virt 中的 serial、PLIC、CLINT、virtio-mmio 等可被枚举，但**枚举不代表已有驱动**。CPU 的裸地址 `reg` 不由 `Node::regs()` 处理；平台发现通过 `Node::reg_address()` 解码它。
 
 ### 驱动匹配与 probe
 
@@ -91,7 +91,7 @@ QEMU virt 中的 serial、PLIC、CLINT、virtio-mmio 等可被枚举，但**枚�
 
 ## MMIO 访问契约
 
-[mmio.h](../src/kernel/platform/mmio.h) 的 `mmio::map(resource)` 只接受非空 MMIO 范围并检查其不超出 `DIRECT_MAP_SIZE`，然后返回 direct-map 别名；**它不建立页表映射**。设备 MMIO 映射在 `vm::k::init()` 阶段建立。当前 `PAGE_OFFSET = 0`，别名为恒等地址；普通驱动应通过 `mmio::map()`，不自行转换 `Paddr`。
+[mmio.h](../src/kernel/platform/mmio.h) 的 `mmio::map(range)` / `mmio::map(device, index)` 只接受非空 MMIO 范围并检查其不超出 `DIRECT_MAP_SIZE`，然后返回 direct-map 别名；**它不建立页表映射**。设备 MMIO 映射在 `vm::k::init()` 阶段建立。当前 `PAGE_OFFSET = 0`，别名为恒等地址；驱动和 early console 均通过 `mmio::map()`，不自行转换 `Paddr`。
 
 `Region::read<T>()` / `write<T>()` 执行单次 volatile 整数访问，类型不超过 8 字节。对齐（绝对地址）和越界仅由 Debug 断言检查，Release 下不是运行时保护。`Region::fence()` 当前发出 `fence rw,rw`；volatile 不代替硬件内存序，新增设备须核对所需的寄存器访问顺序、屏障和寄存器窗口，不能把 `map()` 成功视为这些条件已验证。
 
@@ -121,11 +121,11 @@ handler 运行于中断关闭的 trap 上下文，不能睡眠；尤其 UART han
 
 ### 分层与挂接
 
-[CharDevice](../src/kernel/char_device.h) 同时定义输出、panic hook 和阻塞 `read()`。[console.cc](../src/kernel/console.cc) 负责格式化、正常输出串行化、设备指针和 panic 路径选择；驱动负责硬件、收发队列及输入等待。console 不持有硬件细节，驱动不查询 console 的 panic 状态。
+[char_device.h](../src/kernel/char_device.h) 将输出与输入拆为两层：`ConsoleSink` 定义输出与 panic hook（供早期纯输出后端使用），`CharDevice` 继承 `ConsoleSink` 并补充阻塞 `read()`（供正式驱动实现）。[console.cc](../src/kernel/console.cc) 负责格式化、正常输出串行化、输出 sink / 输入设备指针和 panic 路径选择；驱动负责硬件、收发队列及输入等待。console 不持有硬件细节，驱动不查询 console 的 panic 状态。
 
-`console::attach()` 在锁内排空旧设备再替换指针；`attach_boot()` 是 early 阶段的无锁挂接。指针为空时输出被丢弃，`read()` panic。`read()` 只查找设备并转发，**不持 console 锁等待**。`CharDevice` 的 protected 非虚析构函数禁止通过接口删除；设备没有销毁路径。
+`console::attach()` 在锁内排空旧 sink 再同时更新输出与输入指针；`attach_boot()` 是早期阶段的无锁纯输出挂接（不启用 `console::can_read()`）。输出指针为空时输出被丢弃，无可读 `CharDevice` 时 `read()` panic。`read()` 只查找输入设备并转发，**不持 console 锁等待**。接口的 protected 非虚析构函数禁止通过基类删除；设备没有销毁路径。
 
-成功 probe 返回的对象只要提供 `CharDevice`，就默认成为 console，不依据 `/chosen/stdout-path` 选择真实设备；多个匹配 UART 依 probe 顺序依次替换，最后挂接者成为 console。接口要求实现输入，尚无纯输出 console 类型。
+成功 probe 返回的对象只要提供 `CharDevice`，就默认成为 console，不依据 `/chosen/stdout-path` 选择真实设备；多个匹配 UART 依 probe 顺序依次替换，最后挂接者成为 console。
 
 ### 输出与 panic 契约
 
@@ -155,20 +155,20 @@ handler 运行于中断关闭的 trap 上下文，不能睡眠；尤其 UART han
 
 ### Early console
 
-[early/firmware.cc](../src/kernel/early/firmware.cc) 复用 Ns16550，在静态存储中构造对象，不分配、不在发现路径中记录日志、不依赖 console 锁，也不注册中断，始终轮询输出。
+[platform/early_console.cc](../src/kernel/platform/early_console.cc) 提供独立的纯输出轮询后端（实现 `ConsoleSink`），不依赖 `drivers/`、不分配、不在发现路径中记录日志、不依赖 console 锁，也不注册中断。该层专门隔离引导期早期日志能力，未来适配 OpenSBI 时可在同文件并列接入基于 SBI DBCN / legacy `putchar` 的 `ConsoleSink` 后端。
 
-优先使用 `/chosen/stdout-path` 的绝对路径（去掉 `:` 后选项）；路径不解析别名。没有找到目标节点时 DFS 回退到首个 enabled 的 `ns16550a` / `ns16550` 节点。**chosen 命中不检查 compatible 或 enabled**；命中但 `reg` 不可用时也不再回退。
+当前后端优先使用 `/chosen/stdout-path` 的绝对路径（去掉 `:` 后选项，不解析别名）；未命中时通过 `tree.walk()` 回退到首个 enabled 的 `ns16550a` / `ns16550` 节点。**chosen 命中不检查 compatible 或 enabled**；命中但 `reg` 不可用时也不再回退。
 
-early 路径将非法 `reg-shift` / `reg-io-width` 分别回退为 0 / 1，并检查基址对齐和窗口能覆盖寄存器 7。失败不致命；内核继续，直到有 console 挂接前的输出均丢弃。它直接构造 MMIO Region，不走普通设备的 `mmio::map()`；不可据此假设通用 MMIO 映射检查已执行。
+early 路径通过 `mmio::map()` 检查 direct-map 边界，将非法 `reg-shift` / `reg-io-width` 分别回退为 0 / 1，并校验基址对齐与覆盖寄存器 7 的窗口长度。失败不致命；内核继续，直到有 console 挂接前的输出均丢弃。
 
 ### Ns16550 正式驱动
 
 [ns16550.cc](../src/kernel/drivers/uart/ns16550.cc) 匹配 `ns16550a` / `ns16550`，Device 级、priority 0：
 
-- 使用首个 MMIO 资源，读取 `reg-shift`、`reg-io-width` 和 `clock-frequency`；前两者非法时回退为 0 / 1。按 `SEELE_UART_BAUD`（默认 115200）设置除数、8N1、开启并清空 FIFO；时钟缺失或除数过小时用 1，除数过大时钳为 `0xffff`。
-- 取首个 IRQ 资源以 priority 1 注册 handler，成功才启用接收中断；失败仍可 probe 成功，保持轮询模式。发送空中断只在 TX 环非空时开启，排空后关闭。
+- 通过 `mmio::map(device)` 取首个 MMIO 资源，读取 `reg-shift`、`reg-io-width` 和 `clock-frequency`，将非法 shift/width 回退为 0 / 1 并校验基址对齐与覆盖寄存器 7 的窗口长度。按 `SEELE_UART_BAUD`（默认 115200）设置除数、8N1、开启并清空 FIFO；时钟缺失或除数过小时用 1，除数过大时钳为 `0xffff`。
+- 通过 `device.irq()` 取首个 IRQ 资源以 priority 1 注册 handler，成功才启用接收中断；失败仍可 probe 成功，保持轮询模式。发送空中断只在 TX 环非空时开启，排空后关闭。
 - 每次 handler 先收后发，各自最多处理一个探测出的 FIFO 深度（1 或 16 字节）。RX 环满仍读出硬件字节并丢弃，累计 `rx_overrun_count()`，不等待读者。
-- 设备锁保护环、IER 和共享寄存器。`enter_panic()` 不持设备锁屏蔽 IER，`set_interrupt_enable()` 在写入前后复查设备闩锁，避免并发写者重新开启已屏蔽的源。正式 probe 没有 early 路径同等的完整窗口/对齐预检，不能把可绑定 compatible 当成寄存器布局已验证；尤其 Release 不含 MMIO 访问断言。
+- 设备锁保护环、IER 和共享寄存器。`enter_panic()` 不持设备锁屏蔽 IER，`set_interrupt_enable()` 在写入前后复查设备闩锁，避免并发写者重新开启已屏蔽的源。
 
 ## 当前限制
 

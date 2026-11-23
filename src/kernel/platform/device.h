@@ -1,19 +1,13 @@
 #pragma once
 
-// The device model: what the firmware says exists, in kernel terms.
+// The device model: firmware-described devices and their typed resources.
 //
-// The FDT is a byte parser (fdt/fdt.h) and drivers must not see it. This
-// header is the seam in between: `platform/device.cc` turns tree nodes into
-// `device::Device` and `device::resource`, and a driver only ever consumes
-// resources and attributes. That is why nothing here mentions `fdt` beyond an
-// opaque tree pointer: the type is forward declared, the header does not
-// include it, and the attribute accessors are implemented in the bus (where
-// including the parser is allowed).
+// `platform/device.cc` translates FDT nodes into `device::Device` with typed
+// MMIO windows (`phys_range`) and interrupt lines (`irq_line`), so drivers
+// never include `fdt/fdt.h` or decode raw device-tree cells.
 //
-// Storage is entirely static: an array of devices plus one flat array of
-// resources, each device holding a (first, count) window into it. There is no
-// heap, no allocation order to get wrong, and a device id is just an index into
-// `all()`.
+// Storage is entirely static: an array of devices plus flat typed pools for
+// MMIO ranges and IRQ lines. A device id is its index in `all()`.
 
 #include <cstddef>
 #include <cstdint>
@@ -30,45 +24,14 @@ class Tree;
 
 namespace device {
 
-enum class ResourceType : uint8_t {
-    Mmio,
-    Irq,
-};
-
-struct mmio_range {
-    Paddr base;
-    uint64_t size;
-};
-
 struct irq_line {
-    uint32_t controller;  // device id of the interrupt controller
+    uint32_t controller;  // device id of the interrupt controller, or UINT32_MAX if unknown
     uint32_t number;      // interrupt number in that controller
     uint32_t trigger;     // 1=rising 2=falling 3=level-high 4=level-low, 0=unknown
 };
 
-// One address range or one interrupt line a device owns.
-//
-// The union keeps the flat resource array small and, more importantly, makes
-// "a device has a list of resources of different kinds" a single type instead
-// of a per-device-kind struct (the `platform::Config` mistake this replaces).
-struct resource {
-    ResourceType type;
-
-    union {
-        mmio_range mmio;
-        irq_line irq;
-    };
-};
-
-// Upper bounds for the static storage. QEMU virt describes 16 devices and 27
-// resources, so these are generous. Overflow is truncated with a warning, not
-// a panic: firmware that gives more devices than expected should not kill the
-// kernel.
-//
-// Build parameters (-DSEELE_MAX_DEVICES, -DSEELE_MAX_RESOURCES): they are the
-// capacity of the bus's static arrays and of the range arrays vm::k::init()
-// builds from them, so a board with more devices raises them (and pays in
-// .bss) at configure time.
+// Static capacity bounds (-DSEELE_MAX_DEVICES, -DSEELE_MAX_RESOURCES).
+// Overflow is truncated with a warning rather than panicking.
 #ifndef SEELE_MAX_DEVICES
 #error "SEELE_MAX_DEVICES is not defined: build the kernel through CMake (see CMakeLists.txt)"
 #endif
@@ -78,42 +41,39 @@ struct resource {
 constexpr inline size_t MAX_DEVICES = SEELE_MAX_DEVICES;
 constexpr inline size_t MAX_RESOURCES = SEELE_MAX_RESOURCES;
 
-// Probe state, owned by the driver core. `Unbound` is also the "no driver has
-// claimed me yet" state. Every matched node is probed at most once.
+// Probe state, owned by the driver core. Every matched device is probed at most
+// once.
 enum class Status : uint8_t {
     Unbound,
     Bound,
     Failed,
 };
 
-// One device described by the firmware.
+// One device discovered from firmware.
 //
-// The node itself is kept in platform/device.cc, not here: fdt::Node is an
-// incomplete type in this header and the parser does not expose a node's byte
-// offset. `m_node` is the index of that node handle, stable because devices are
-// never removed for the kernel's lifetime. The tree itself is the file-scope
-// `static fdt::Tree` in kmain.cc and outlives every device, so no per-device
-// tree pointer is needed here.
+// Stores only its structure-block byte offset (`m_fdt_offset`) into the
+// kernel-lifetime `fdt::Tree` owned by `platform/platform.cc`, keeping
+// `fdt/fdt.h` completely out of driver headers.
 class Device {
 public:
     Device() noexcept = default;
 
-    // The node name as written in the tree, e.g. "serial@10000000".
+    // Node name as written in firmware, e.g. "serial@10000000".
     [[nodiscard]] std::string_view name() const noexcept;
 
-    // The first compatible string, e.g. "ns16550a".
+    // First compatible string, e.g. "ns16550a".
     [[nodiscard]] std::string_view compatible() const noexcept;
 
     [[nodiscard]] bool is_compatible(std::string_view id) const noexcept;
 
-    [[nodiscard]] std::span<const resource> resources() const noexcept;
+    // Typed resource slices (O(1) access).
+    [[nodiscard]] std::span<const phys_range> mmios() const noexcept;
+    [[nodiscard]] std::span<const irq_line> irqs() const noexcept;
+    [[nodiscard]] std::optional<phys_range> mmio(size_t index = 0) const noexcept;
+    [[nodiscard]] std::optional<irq_line> irq(size_t index = 0) const noexcept;
 
-    // The `index`-th resource of `type`, or nullptr when there is none.
-    [[nodiscard]] const resource* find_resource(ResourceType type, size_t index = 0) const noexcept;
-
-    // Driver-private attributes, decoded here so a driver never learns that a
-    // device tree exists. `std::nullopt` when the property is absent or has the
-    // wrong shape.
+    // Driver-specific firmware properties. Returns std::nullopt when absent or
+    // malformed.
     [[nodiscard]] std::optional<uint32_t> u32_property(std::string_view name) const noexcept;
     [[nodiscard]] std::optional<std::string_view>
         string_property(std::string_view name) const noexcept;
@@ -126,8 +86,7 @@ public:
         m_status = status;
     }
 
-    // The successfully probed object, not the raw allocation it was constructed
-    // in. Subsystems borrow its interfaces; the object outlives the kernel.
+    // Borrowed pointer to the probed driver object; outlives the kernel.
     [[nodiscard]] Object* object() const noexcept {
         return m_object;
     }
@@ -139,10 +98,11 @@ public:
 private:
     friend void enumerate(const fdt::Tree& tree) noexcept;
 
-    // Index into the bus's node-handle table, not a tree node offset.
-    int m_node = -1;
-    uint16_t m_first_resource = 0;
-    uint16_t m_resource_count = 0;
+    int m_fdt_offset = -1;
+    uint16_t m_mmio_begin = 0;
+    uint16_t m_mmio_count = 0;
+    uint16_t m_irq_begin = 0;
+    uint16_t m_irq_count = 0;
     Status m_status = Status::Unbound;
     Object* m_object = nullptr;
 };
@@ -150,11 +110,11 @@ private:
 // Every enumerated device, in depth-first tree order.
 [[nodiscard]] std::span<Device> all() noexcept;
 
-// The device with the given id, or nullptr when the id is out of range.
+// Device with the given id, or nullptr when out of range.
 [[nodiscard]] Device* by_id(uint32_t id) noexcept;
 
-// Walk the tree and fill the static device and resource arrays. Called once by
-// kmain(), before any driver probes.
+// Walk `tree` and populate the static device and resource pools. `tree` must
+// remain alive for the entire kernel lifetime.
 void enumerate(const fdt::Tree& tree) noexcept;
 
 }  // namespace device

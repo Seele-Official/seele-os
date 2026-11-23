@@ -20,8 +20,8 @@ start.S → start.cc                    M-mode：选栈、cpuid、机器状态
                 │ mret
                 ▼
 kmain.cc                             S-mode 启动编排
-  ├─ early + fdt                     早期 console、设备树读取
-  ├─ boot + platform                 内存/hart 描述、设备与资源发现
+  ├─ fdt                             只读设备树读取
+  ├─ platform                        早期 console、内存/hart/设备发现、MMIO
   ├─ mm                              物理页 → 页表 → 堆与线程栈
   ├─ drivers                         控制器与设备 probe、正式 console
   └─ proc + shed + trap              线程入口、切换、中断与等待
@@ -48,21 +48,21 @@ libc + cxx/runtime                    freestanding 运行时支持
 
 ### boot hart
 
-| 阶段         | 主要动作                                                                 | 完成后可以依赖什么                                |
-| ------------ | ------------------------------------------------------------------------ | ------------------------------------------------- |
-| 汇编入口     | [start.S](../src/kernel/start.S) 选择 boot 栈，将 `cpuid=0` 写入 `tp`    | 有可用栈，尚未执行全局 C++ 初始化                 |
-| M-mode 交接  | [start.cc](../src/kernel/start.cc) 配置机器状态，以 `satp=0` 进入 S-mode | 可在无分页状态下访问 RAM/MMIO                     |
-| 早期发现     | 清 `.bss`、执行 `.init_array`，建立 `fdt::Tree`，尝试挂接 early console  | 可以解析 DTB；有 console 时可以记录后续发现日志   |
-| 平台描述     | `device::enumerate()`、`boot::parse()`                                   | 设备资源、内存保留区、hart 与 timebase 描述已建立 |
-| 分页准备     | `phymem::init()`、`vm::k::init()`、`create_process_pagetable()`          | 物理页可分配，共享内核映射和首个进程根表已建立    |
-| 启用分页     | `vm::k::enable()`                                                        | 当前 hart 才能解引用高位堆对象                    |
-| 内核对象     | 创建 idle 进程和 idle 线程，映射其内核栈                                 | 有可进入的线程上下文                              |
-| 驱动与 shell | 按级别 probe；若 console 已挂接则创建 shell 线程，加入 ready 队列        | 设备 handler 注册完成，初始线程集合确定           |
-| 发布与切换   | release 发布 `started`，切入 idle                                        | secondary 可继续初始化；boot 上下文不再恢复       |
+| 阶段         | 主要动作                                                                        | 完成后可以依赖什么                                |
+| ------------ | ------------------------------------------------------------------------------- | ------------------------------------------------- |
+| 汇编入口     | [start.S](../src/kernel/start.S) 选择 boot 栈，将 `cpuid=0` 写入 `tp`           | 有可用栈，尚未执行全局 C++ 初始化                 |
+| M-mode 交接  | [start.cc](../src/kernel/start.cc) 配置机器状态，以 `satp=0` 进入 S-mode        | 可在无分页状态下访问 RAM/MMIO                     |
+| 早期发现     | 清 `.bss`、执行 `.init_array`，`platform::init()` 绑定 DTB 并挂接 early console | 可以解析 DTB；有 console 时可以记录后续发现日志   |
+| 平台描述     | `platform::init()` 枚举设备并解析内存/保留区、hart、timebase 与 `/chosen`       | 设备资源、内存保留区、hart 与 timebase 描述已建立 |
+| 分页准备     | `phymem::init()`、`vm::k::init()`、`create_process_pagetable()`                 | 物理页可分配，共享内核映射和首个进程根表已建立    |
+| 启用分页     | `vm::k::enable()`                                                               | 当前 hart 才能解引用高位堆对象                    |
+| 内核对象     | 创建 idle 进程和 idle 线程，映射其内核栈                                        | 有可进入的线程上下文                              |
+| 驱动与 shell | 按级别 probe；若 console 已挂接则创建 shell 线程，加入 ready 队列               | 设备 handler 注册完成，初始线程集合确定           |
+| 发布与切换   | release 发布 `started`，切入 idle                                               | secondary 可继续初始化；boot 上下文不再恢复       |
 
 `idle()` 在自己的线程栈上归还本 hart 的启动栈，安装 `stvec`、设置定时器并开启中断，随后执行 `wfi`。shell 首次由调度路径运行，入口自行开启中断并输出提示符。
 
-早期 console 挂接失败本身不致命；没有 sink 的输出会丢弃。无效 DTB 则会触发断言。是否有 shell 取决于最终 `console::attached()`，不能把“已进入 idle”视为交互可用。
+早期 console 挂接失败本身不致命；没有 sink 的输出会丢弃。无效 DTB 则会触发断言。是否有 shell 取决于最终 `console::can_read()`（输出型早期 sink 不会触发 shell 启动），不能把“已进入 idle”视为交互可用。
 
 ### secondary hart
 

@@ -4,9 +4,9 @@
 #include <span>
 
 #include "riscv.h"
-#include "boot/info.h"
 #include "mm/addr.h"
 #include "platform/device.h"
+#include "platform/platform.h"
 
 namespace vm {
 
@@ -262,7 +262,7 @@ constexpr inline uint64_t HEAP_ARENA_COUNT = 7;          // 16, 32, 64, 128, 256
 // `devices` is the enumerated platform bus (platform/device.h). It is passed
 // instead of having vm include the bus, so the address space stays below the
 // driver model in the include graph.
-void init(std::span<boot::region> regions, std::span<device::Device> devices);
+void init(const platform::MemoryMap& memory, std::span<const device::Device> devices);
 
 // Build a fresh process root page table and reserve its kernel stack subtree.
 //

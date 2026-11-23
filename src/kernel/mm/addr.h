@@ -191,15 +191,20 @@ template <address_like Address>
 // Half-open byte ranges
 // ---------------------------------------------------------------------------
 //
-// A range is [begin, begin + size), the same convention boot::region and the
-// page-table walks use. The endpoints are addresses, so they keep their Paddr
+// A range is [base, base + size), shared across FDT decoding, platform memory
+// maps, device MMIO windows, and page-table walks. Endpoints keep their Paddr
 // or Vaddr type; only the length is a raw count.
+
+struct phys_range {
+    Paddr base = null_paddr();
+    uint64_t size = 0;
+};
 
 // True when [begin, begin + size) fits below the top of the address space, i.e.
 // when range_end() would not have to saturate. A region that fails this has no
 // addressable end, so a caller that receives one from firmware or a configuration
 // file should drop it instead of clamping it -- which is exactly what
-// boot::add_region() does.
+// platform::init() does.
 template <address_like Address>
 [[nodiscard]] constexpr bool range_fits(Address begin, uint64_t size) noexcept {
     return size <= UINT64_MAX - to_uint64(begin);

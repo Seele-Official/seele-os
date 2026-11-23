@@ -13,30 +13,23 @@
 // the same when the address space moves -- only the P2V()/V2P() calls in
 // kalloc.cc follow PAGE_OFFSET.
 //
-// init() receives the boot-time regions and keeps only RegionKind::Usable,
-// subtracting every RegionKind::Reserved range. That is how the device tree
-// blob, firmware reservations and the initrd stay out of the pool without
-// phymem knowing anything about the FDT.
+// init() receives `platform::MemoryMap`, adding `usable()` pages while
+// subtracting every `reserved()` range so the DTB, firmware reservations, and
+// initrd stay out of the pool without phymem knowing anything about FDT.
 
-#include <span>
-
-#include "boot/info.h"
 #include "mm/addr.h"
+#include "platform/platform.h"
 
 namespace phymem {
 
-// Build the free list from the usable physical memory regions, minus every
-// reserved region.
+// Build the free list from `memory.usable()`, minus every range in
+// `memory.reserved()`, the kernel image (`[_start, _end)`), and the boot stack
+// pool (`.stack`, freed later by each hart's idle thread).
 //
-// Must be called exactly once, before alloc()/free(), while only one hart is
-// running. Pages that overlap the kernel image (see linker.ld: [_start, _end))
-// are never added; the boot stack pool (linker.ld: .stack, after _end) is also
-// skipped because harts are still standing on it, but those pages re-enter the
-// pool when each hart frees its own slice after boot. A usable region that is
-// not PGSIZE-aligned at one end loses the partial page at that end, because only
-// whole pages can be handed out; a page that intersects a reserved region in any
-// way is dropped whole.
-void init(std::span<const boot::region> regions) noexcept;
+// Must be called exactly once before alloc()/free(), while only one hart is
+// running. Partial pages at unaligned region ends are dropped; any page
+// overlapping a reserved range is excluded whole.
+void init(const platform::MemoryMap& memory) noexcept;
 
 // Remove the first page from the free list and return its physical address.
 // The returned address is PGSIZE-aligned; dereference it through

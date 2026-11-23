@@ -8,7 +8,7 @@
 
 格式串是字面量时由 `consteval` 检查：占位符数量、整数/字符串类型以及格式说明符都在编译期验证。运行时格式串只能传给 `vprint()` / `vprintln()`；它们用同一解析器再次解析，非法占位符按文本输出，不会静默变成另一种格式。支持整数（默认十进制，`d`/`x`/`X`/`b`/`B`，可选 `#`、零填充和最多 255 的宽度）、`bool` 和可转为 `std::string_view` 的字符串。
 
-普通输出在 console 自旋锁内完成一次调用的格式化，并以 64 字节 staging 块交给 [`CharDevice::write()`](../src/kernel/char_device.h)；一次 `println()` 或日志调用的内容不会被其他正常写者插入，但多次 `print()` 拼成的行并不因此整体原子化。设备队列满时，驱动会在调用现场轮询发送端再继续接收；这会使输出变慢，具体等待取决于设备状态，不要据此作实时性承诺。该路径不调度，可从启动代码、trap 和中断处理器使用；未挂接设备时输出被丢弃。`console::read()` 是线程上下文的阻塞转发：没有设备会 panic，等待和唤醒由驱动负责。
+普通输出在 console 自旋锁内完成一次调用的格式化，并以 64 字节 staging 块交给 [`ConsoleSink::write()`](../src/kernel/char_device.h)；一次 `println()` 或日志调用的内容不会被其他正常写者插入，但多次 `print()` 拼成的行并不因此整体原子化。设备队列满时，驱动会在调用现场轮询发送端再继续接收；这会使输出变慢，具体等待取决于设备状态，不要据此作实时性承诺。该路径不调度，可从启动代码、trap 和中断处理器使用；未挂接输出 sink 时输出被丢弃。`console::read()` 是线程上下文的阻塞转发：没有挂接支持输入的 `CharDevice` 会 panic，等待和唤醒由驱动负责。
 
 ## Assert、panic 和停机
 
@@ -56,7 +56,7 @@ pixi run riscv64-unknown-elf-addr2line -f -C -i -e build/kernel.elf 0x8000019a
 
 ## 排查清单
 
-1. **完全无输出**：确认 QEMU 串口参数、`early::attach_console()` 和后续 `console::attach()`；没有 sink 时早期失败可能只有内存中的停机，没有可见日志。
+1. **完全无输出**：确认 QEMU 串口参数、`platform::attach_early_console()` 和后续 `console::attach()`；没有 sink 时早期失败可能只有内存中的停机，没有可见日志。
 2. **出现 panic**：先保存完整的 `panic:`、`at file:line` 和全部地址，再用对应 ELF 反汇编/`addr2line` 交叉核对。
 3. **只有 `abort() called`**：从 `#0` 向上定位 libstdc++ 调用点；它通常没有条件文本和源位置。
 4. **栈过早结束**：检查是否处于建线程前、是否经过 `switch_thread()`、是否有尾调用或汇编序言；不要先假设是回溯器越界。

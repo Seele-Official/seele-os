@@ -19,12 +19,11 @@
 
 namespace {
 
-// The device the console writes through and reads from, or nullptr before a
-// driver attaches one. Writers reach it under `g_lock`, which is what serialises
-// whole lines; the reader loads it without the lock, because blocking on the
-// device while holding a lock would stop the interrupt that fills its queue --
-// hence the atomic, which is only about publishing the pointer safely.
-std::atomic<CharDevice*> g_device{nullptr};
+// Output sink (early console or full driver) and interactive input source (full
+// CharDevice only). Output runs under `g_lock`; `read()` loads `g_input`
+// without holding `g_lock` so blocking does not stall writers or interrupts.
+std::atomic<ConsoleSink*> g_sink{nullptr};
+std::atomic<CharDevice*> g_input{nullptr};
 Spinlock g_lock{};
 
 // Latched by console::enter_panic() and never cleared. A writer checks it before
@@ -80,11 +79,11 @@ public:
         if(m_count == 0) {
             return;
         }
-        if(CharDevice* device = g_device.load(std::memory_order_relaxed); device != nullptr) {
+        if(ConsoleSink* sink = g_sink.load(std::memory_order_relaxed); sink != nullptr) {
             if(m_is_polled) {
-                device->write_polled(m_stage, m_count);
+                sink->write_polled(m_stage, m_count);
             } else {
-                device->write(m_stage, m_count);
+                sink->write(m_stage, m_count);
             }
         }
         m_count = 0;
@@ -331,35 +330,35 @@ namespace console {
 
 void attach(CharDevice& device) noexcept {
     LockGuard guard{g_lock};
-    CharDevice* const previous = g_device.load(std::memory_order_relaxed);
-    if(previous != nullptr && previous != &device) {
-        // The old device may still hold bytes the asynchronous path accepted.
-        // Finish them before the new one takes over, so a handover (the early
-        // firmware console to the real driver) does not reorder output.
+    ConsoleSink* const previous = g_sink.load(std::memory_order_relaxed);
+    if(previous != nullptr && previous != static_cast<ConsoleSink*>(&device)) {
+        // Finish any buffered output from the previous sink before handing over
+        // so early-console-to-driver transition does not reorder output.
         previous->flush();
     }
-    g_device.store(&device, std::memory_order_release);
+    g_sink.store(&device, std::memory_order_release);
+    g_input.store(&device, std::memory_order_release);
 }
 
-void attach_boot(CharDevice& device) noexcept {
-    // No lock and no validation: the early console runs before any other hart
-    // or interrupt exists, and a spinlock's misuse checks would call into the
-    // panic path that this very device is supposed to carry.
-    g_device.store(&device, std::memory_order_release);
+void attach_boot(ConsoleSink& sink) noexcept {
+    // Lockless: runs on the boot hart before other harts, interrupts, or
+    // spinlock misuse paths are ready.
+    g_sink.store(&sink, std::memory_order_release);
+    g_input.store(nullptr, std::memory_order_release);
 }
 
 bool attached() noexcept {
-    return g_device.load(std::memory_order_acquire) != nullptr;
+    return g_sink.load(std::memory_order_acquire) != nullptr;
+}
+
+bool can_read() noexcept {
+    return g_input.load(std::memory_order_acquire) != nullptr;
 }
 
 char read() noexcept {
-    // Only the lookup is this layer's: the wait belongs to the device, which
-    // owns the receive queue and the interrupt that wakes the reader
-    // (CharDevice::read()). No lock is held here, so the device is free to sleep
-    // and the interrupt handler is free to take the console lock for output.
-    CharDevice* const device = g_device.load(std::memory_order_acquire);
+    CharDevice* const device = g_input.load(std::memory_order_acquire);
     if(device == nullptr) {
-        SEELE_PANIC("console::read(): no console device attached");
+        SEELE_PANIC("console::read(): no readable console device attached");
     }
     return device->read();
 }
@@ -367,23 +366,20 @@ char read() noexcept {
 void flush() noexcept {
     while(true) {
         if(g_panicking.load(std::memory_order_acquire)) {
-            if(CharDevice* device = g_device.load(std::memory_order_acquire); device != nullptr) {
-                device->flush_polled();
+            if(ConsoleSink* sink = g_sink.load(std::memory_order_acquire); sink != nullptr) {
+                sink->flush_polled();
             }
             return;
         }
 
         TryLockGuard guard{g_lock};
         if(guard.locked()) {
-            // Same second check as vprint_impl(): a panic that latched between
-            // the load above and this acquisition must select the polled flush,
-            // which does not wait for a device lock the panic path may hold.
             const bool is_polled = g_panicking.load(std::memory_order_acquire);
-            if(CharDevice* device = g_device.load(std::memory_order_relaxed); device != nullptr) {
+            if(ConsoleSink* sink = g_sink.load(std::memory_order_relaxed); sink != nullptr) {
                 if(is_polled) {
-                    device->flush_polled();
+                    sink->flush_polled();
                 } else {
-                    device->flush();
+                    sink->flush();
                 }
             }
             return;
@@ -393,23 +389,14 @@ void flush() noexcept {
 }
 
 void enter_panic() noexcept {
-    // Tell the device before publishing the console latch. A writer that checked
-    // the latch just before it was set then still finds the device's own latch
-    // set and takes the polled path instead of queueing bytes behind this drain. The
-    // order also keeps the drain honest: it runs after the device has stopped
-    // accepting queued output.
-    CharDevice* const device = g_device.load(std::memory_order_acquire);
-    if(device != nullptr) {
-        device->enter_panic();
+    ConsoleSink* const sink = g_sink.load(std::memory_order_acquire);
+    if(sink != nullptr) {
+        sink->enter_panic();
     }
 
-    // The first panic drains what the asynchronous path already accepted, so the
-    // panic text cannot overtake log lines that were handed to the sink before
-    // it. Everything after the latch goes through write_polled(), so there is
-    // nothing left to drain on later calls.
     if(!g_panicking.exchange(true, std::memory_order_acq_rel)) {
-        if(device != nullptr) {
-            device->flush_polled();
+        if(sink != nullptr) {
+            sink->flush_polled();
         }
     }
 }

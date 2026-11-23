@@ -14,9 +14,9 @@
 // build that forgets it fail here rather than quietly picking a different
 // hart count than the one on the configure command line.
 //
-// The single hart bound in the kernel. One number sizes boot::info's FDT hart
-// list (boot/info.h), the per-hart `cpus[]` array in hart.cc and the boot stack
-// pool (boot/stack.h), so none of those bounds can drift apart: the pool covers
+// The single hart bound in the kernel. One number sizes platform::Info's FDT
+// hart list (platform/platform.h), the per-hart `cpus[]` array in hart.cc and
+// the boot stack pool (boot/stack.h), so none of those bounds can drift apart:
 // every dense cpuid, and cpus[] is indexed by exactly that cpuid. start.cc
 // static_asserts the pool equality. Kernel stacks live per process (one slot per
 // thread, see proc/process.h), so MAX_HARTS does not bound a stack window.

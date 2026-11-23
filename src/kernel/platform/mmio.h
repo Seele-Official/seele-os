@@ -1,11 +1,11 @@
 #pragma once
 
-// MMIO access for drivers.
+// MMIO access for drivers and early platform sinks.
 //
-// A driver never computes a pointer from a physical address: it asks for a
-// `mmio::Region` and uses read()/write()/fence(). `map()` below is the single
-// place where a resource's physical range becomes the virtual base of a Region.
+// Callers never compute a pointer from a physical address: they obtain an
+// `mmio::Region` through `map()` and access registers via read()/write()/fence().
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <type_traits>
@@ -19,10 +19,8 @@ namespace mmio {
 
 // A window onto a device's registers.
 //
-// Accesses are volatile: the compiler must not fold, reorder or discard them,
-// and one write must stay one store of the requested width. RISC-V does not
-// order MMIO accesses beyond the weak default, so ordering relative to other
-// accesses is expressed with fence(), the only ordering primitive drivers get.
+// Accesses are volatile so each read/write stays a single access of the
+// requested width; ordering across registers is expressed with fence().
 class Region {
 public:
     constexpr Region() noexcept = default;
@@ -53,27 +51,15 @@ public:
         return m_size;
     }
 
-    // Order every earlier read/write before every later one. `rw,rw` is enough
-    // for device registers; the kernel does not need the stronger `io` variants
-    // because it never relies on I/O ordering beyond that.
     void fence() const noexcept {
         asm volatile("fence rw,rw" ::: "memory");
     }
 
 private:
-    // Misaligned and out-of-range register accesses are driver bugs, so both
-    // are checks rather than runtime errors. They are debug-only: the release
-    // build must not pay for them on every character written to a UART.
-    //
-    // The alignment test is on the absolute address, not on the offset: a
-    // region whose base is not naturally aligned makes even offset 0 misaligned
-    // for the wider accesses.
     template <typename T>
     constexpr void check(uint64_t offset) const noexcept {
         SEELE_DASSERT((to_uint64(m_base) + offset) % sizeof(T) == 0);
         SEELE_DASSERT(offset <= m_size && sizeof(T) <= m_size - offset);
-        // SEELE_DASSERT expands to nothing under NDEBUG, which would otherwise
-        // leave the parameter unused in release builds.
         (void)offset;
     }
 
@@ -81,30 +67,24 @@ private:
     uint64_t m_size = 0;
 };
 
-// Turn a device resource into an accessible region.
-//
-// This is the single mapping seam, and the only place a driver needs to know
-// that addresses have a physical/virtual split: it converts the resource's
-// Paddr into the direct-map alias with vm::k::P2V(). Drivers never call P2V()
-// themselves. PAGE_OFFSET is zero today, so that alias is currently the
-// physical address itself.
-[[nodiscard]] inline std::optional<Region> map(const device::resource& resource) noexcept {
-    if(resource.type != device::ResourceType::Mmio) {
+// Turn a physical range into its direct-map Region. Does not create page table
+// entries (device MMIO mappings are installed during `vm::k::init()`).
+[[nodiscard]] inline std::optional<Region> map(const phys_range& range) noexcept {
+    if(range.size == 0) {
         return std::nullopt;
     }
-    if(resource.mmio.size == 0) {
+    const uint64_t base = to_uint64(range.base);
+    if(base > vm::k::DIRECT_MAP_SIZE || range.size > vm::k::DIRECT_MAP_SIZE - base) {
         return std::nullopt;
     }
+    return Region{vm::k::P2V(range.base), range.size};
+}
 
-    const uint64_t base = to_uint64(resource.mmio.base);
-    // Reject a range that leaves the direct map; handing it to a driver would
-    // produce an address that nothing backs. The bound is the address space's,
-    // so it lives in vm.h next to PAGE_OFFSET.
-    if(base > vm::k::DIRECT_MAP_SIZE || resource.mmio.size > vm::k::DIRECT_MAP_SIZE - base) {
-        return std::nullopt;
-    }
-
-    return Region{vm::k::P2V(resource.mmio.base), resource.mmio.size};
+// Convenience overload: map the `index`-th MMIO window of `device`.
+[[nodiscard]] inline std::optional<Region> map(const device::Device& device,
+                                               size_t index = 0) noexcept {
+    const auto range = device.mmio(index);
+    return range ? map(*range) : std::nullopt;
 }
 
 }  // namespace mmio

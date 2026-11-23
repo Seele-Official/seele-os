@@ -49,7 +49,7 @@ set(SEELE_LINKER_SCRIPT
 # below run at configure time, where the message can name the flag.
 #
 # SEELE_MAX_HARTS is the one hart bound: it is MAX_HARTS in hart.h, it sizes
-# boot::info's harts, the per-hart cpus[] table and the boot stack pool (one
+# platform::Info's harts, the per-hart cpus[] table and the boot stack pool (one
 # dense cpuid slot each). A hart whose dense cpuid does not fit is parked by
 # _entry instead of running. There is deliberately no second "how many boot
 # stacks" knob: two numbers that must agree are one number, and deriving it
@@ -73,7 +73,7 @@ set(SEELE_KSTACK_SIZE 16384 CACHE STRING "Kernel stack each process maps, in byt
 # Capacity of the fixed-size tables that hold firmware descriptions. Firmware
 # that exceeds them is truncated with a warning, never fatal, so these trade
 # static memory for how much of a machine the kernel can describe.
-set(SEELE_MAX_REGIONS 32 CACHE STRING "boot::info physical memory region capacity")
+set(SEELE_MAX_REGIONS 32 CACHE STRING "Platform physical memory region capacity")
 set(SEELE_MAX_DEVICES 48 CACHE STRING "Platform bus device capacity")
 set(SEELE_MAX_RESOURCES 128 CACHE STRING "Platform bus resource capacity")
 set(SEELE_MAX_DRIVERS 32 CACHE STRING "Driver probe order capacity")
@@ -226,10 +226,9 @@ add_executable(kernel
     src/kernel/hart.cc
     src/kernel/stacktrace.cc
     src/kernel/concurrency/spinlock.cc
-    src/kernel/early/firmware.cc
-    src/kernel/fdt/reader.cc
-    src/kernel/fdt/tree.cc
-    src/kernel/boot/fdt_boot.cc
+    src/kernel/fdt/fdt.cc
+    src/kernel/platform/early_console.cc
+    src/kernel/platform/platform.cc
     src/kernel/platform/device.cc
     src/kernel/drivers/registry.cc
     src/kernel/drivers/table.cc

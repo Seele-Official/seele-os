@@ -6,7 +6,7 @@
 
 - 调度单位是 `proc::thread`；`proc::process` 保存共享地址空间，不直接参与选取。
 - 每个 hart 有自己的 idle、current、ready 和 sleeping；idle 不进入 ready。
-- boot hart 仅在 `console::attached()` 为真时创建 shell，它与 idle 属于同一个进程、使用不同栈槽位；secondary 当前只有 idle。
+- boot hart 仅在 `console::can_read()` 为真时创建 shell，它与 idle 属于同一个进程、使用不同栈槽位；secondary 当前只有 idle。
 - 内核 trap 路径的定时器和外部中断在处理后调用 `shed::schedule()`；线程也可以主动 `shed::sleep()`。`shed::yield()` 已提供，但当前没有调用者。
 - 所有运行中的线程都在内核态；没有线程退出、资源回收或跨 hart 调度。
 

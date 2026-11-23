@@ -533,26 +533,27 @@ device::Object* probe(device::Device& device, void* priv) noexcept {
         return nullptr;
     }
 
-    const device::resource* resource = device.find_resource(device::ResourceType::Mmio, 0);
-    if(resource == nullptr) {
-        return nullptr;
-    }
-    const std::optional<mmio::Region> region = mmio::map(*resource);
-    if(!region.has_value()) {
+    const auto region = mmio::map(device);
+    if(!region) {
         return nullptr;
     }
 
-    // Generic 16550 bindings. Values the driver cannot honour are replaced with
-    // the 8-bit, unshifted default instead of failing the probe: a UART that
-    // prints is better than no console at all.
+    // Generic 16550 bindings. Unsupported shift/width values fall back to the
+    // 8-bit unshifted defaults, then the window and alignment are validated
+    // before touching hardware registers.
+    constexpr uint32_t HIGHEST_REG = 7;
+    const uint32_t clock = device.u32_property("clock-frequency").value_or(0);
     uint32_t shift = device.u32_property("reg-shift").value_or(0);
     uint32_t width = device.u32_property("reg-io-width").value_or(1);
-    const uint32_t clock = device.u32_property("clock-frequency").value_or(0);
     if(shift > 3) {
         shift = 0;
     }
     if(width != 1 && width != 4) {
         width = 1;
+    }
+    const uint64_t required = (uint64_t{HIGHEST_REG} << shift) + width;
+    if(region->size() < required || (to_uint64(region->base()) & (width - 1)) != 0) {
+        return nullptr;
     }
 
     // The probe owns the placement new: the driver core only hands over a
@@ -565,8 +566,8 @@ device::Object* probe(device::Device& device, void* priv) noexcept {
     // table all leave the driver polled, exactly as the early console runs.
     bool is_interrupt_driven = false;
     uint32_t irq = 0;
-    if(const device::resource* line = device.find_resource(device::ResourceType::Irq, 0)) {
-        irq = line->irq.number;
+    if(const auto line = device.irq()) {
+        irq = line->number;
         is_interrupt_driven = trap::register_external_handler(irq, *self, IRQ_PRIORITY);
     }
     if(is_interrupt_driven) {

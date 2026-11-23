@@ -145,15 +145,8 @@ device::Object* probe(device::Device& device, void* priv) noexcept {
         return nullptr;
     }
 
-    const device::resource* resource = device.find_resource(device::ResourceType::Mmio, 0);
-    if(resource == nullptr) {
-        return nullptr;
-    }
-    const std::optional<mmio::Region> region = mmio::map(*resource);
-    if(!region.has_value()) {
-        return nullptr;
-    }
-    if(region->size() < MIN_REGION_SIZE) {
+    const auto region = mmio::map(device);
+    if(!region || region->size() < MIN_REGION_SIZE) {
         return nullptr;
     }
 

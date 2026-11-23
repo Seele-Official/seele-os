@@ -246,27 +246,25 @@ enum class Level : uint8_t {
     Err,
 };
 
-// Make `device` the console's character device: the sink output goes through and
-// the source read() blocks on. Called by the driver core when the object
-// returned by probe exposes CharDevice through device::dyn_cast.
-//
-// Attaching twice replaces the device, which is how the early console hands over
-// to the full driver; the old one is flushed first, so the handover cannot
-// reorder output.
+// Make `device` both the console's output sink and its input source. Called by
+// the driver core when a probed object exposes `CharDevice` through
+// `device::dyn_cast`. Flushes any previous sink under the console lock before
+// handing over so early-to-driver transition preserves output order.
 void attach(CharDevice& device) noexcept;
 
-// Boot-time variant of attach(): stores the sink without taking the console
-// lock. It exists for the early firmware console (src/kernel/early), which runs
-// before other harts, interrupts or the driver core exist, and which must not
-// depend on a lock that panics on misuse. Logging, assertions and locks are all
-// deliberately unavailable that early; the driver that takes over uses
-// attach().
-void attach_boot(CharDevice& device) noexcept;
+// Lockless boot-time output attachment for the early platform console
+// (platform/early_console.h). Installs an output-only `ConsoleSink` before
+// locks, interrupts, or other harts exist; does not enable `console::read()`.
+void attach_boot(ConsoleSink& sink) noexcept;
 
-// Whether anything is attached. The driver core checks this before logging
-// from a probe: the console is optional (early::attach_console() reports
-// whether it found one), so probing must not assume a sink exists.
+// Whether an output sink (early or full driver) is attached.
 [[nodiscard]] bool attached() noexcept;
+
+// Whether an interactive input-capable `CharDevice` is attached. Callers such
+// as shell startup check this rather than `attached()`, so an output-only early
+// console (such as OpenSBI debug console) never starts a reader that cannot
+// block on input.
+[[nodiscard]] bool can_read() noexcept;
 
 // Block until the attached device delivers one byte, then return it. Thread
 // context only: it requires a current thread, interrupts enabled and no
