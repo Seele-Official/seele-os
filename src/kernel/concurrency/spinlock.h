@@ -14,7 +14,7 @@
 // interrupted code owns the lock. Locks nest: only the outermost unlock()
 // restores the interrupt state the outermost lock() found, so an inner critical
 // section never turns interrupts back on early. The nesting bookkeeping lives in
-// spinlock.cc and is per-hart state.
+// concurrency/spinlock.cc and is per-hart state.
 //
 // Misuse panics instead of corrupting state: locking a lock this hart already
 // owns, unlocking a lock this hart does not own, and unwinding the interrupt

@@ -11,10 +11,10 @@
 
 #include "format_spec.h"
 #include "hart.h"
-#include "lock_guard.h"
 #include "panic.h"
 #include "riscv.h"
-#include "spinlock.h"
+#include "concurrency/lock_guard.h"
+#include "concurrency/spinlock.h"
 #include "shed/schedule.h"
 
 namespace {

@@ -9,10 +9,10 @@
 
 #include "console.h"
 #include "hart.h"
-#include "lock_guard.h"
 #include "panic.h"
 #include "riscv.h"
 #include "trap.h"
+#include "concurrency/lock_guard.h"
 #include "shed/schedule.h"
 
 namespace drivers::uart {

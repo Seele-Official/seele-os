@@ -4,7 +4,7 @@
 #include <cstdint>
 
 #include "list.h"
-#include "spinlock.h"
+#include "concurrency/spinlock.h"
 #include "proc/process.h"
 
 // Maximum number of harts the kernel can describe.

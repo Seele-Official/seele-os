@@ -1,9 +1,9 @@
 
 #include "hart.h"
-#include "lock_guard.h"
 #include "panic.h"
 #include "riscv.h"
 #include "switch.h"
+#include "concurrency/lock_guard.h"
 
 namespace shed {
 using namespace riscv;

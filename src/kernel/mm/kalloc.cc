@@ -5,10 +5,10 @@
 #include <span>
 
 #include "console.h"
-#include "lock_guard.h"
 #include "panic.h"
 #include "riscv.h"
-#include "spinlock.h"
+#include "concurrency/lock_guard.h"
+#include "concurrency/spinlock.h"
 #include "mm/addr.h"
 #include "mm/vm.h"
 

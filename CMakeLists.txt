@@ -223,9 +223,9 @@ add_executable(kernel
     src/kernel/trap.cc
     src/kernel/tvec.S
     src/kernel/console.cc
-    src/kernel/spinlock.cc
     src/kernel/hart.cc
     src/kernel/stacktrace.cc
+    src/kernel/concurrency/spinlock.cc
     src/kernel/early/firmware.cc
     src/kernel/fdt/reader.cc
     src/kernel/fdt/tree.cc

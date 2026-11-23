@@ -60,8 +60,8 @@
 #include <optional>
 
 #include "char_device.h"
-#include "spinlock.h"
 #include "trap.h"
+#include "concurrency/spinlock.h"
 #include "drivers/registry.h"
 #include "platform/device.h"
 #include "platform/mmio.h"
