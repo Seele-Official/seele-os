@@ -8,23 +8,19 @@
 
 ### 准备环境
 
-- 开发环境为 Linux x86-64（Pixi workspace 目前只声明 `linux-64`）。
-- 安装 Pixi，版本要求见 [pixi.toml](pixi.toml)（当前为 `>=0.84`）；其余工具由 Pixi 管理。
-- 将独立的 `seele-toolchain` 仓库准备在项目根目录下的 `toolchain/`。它不随本仓库提供，也不是自动拉取的子模块；缺少它时，下面的本地 channel 构建无法执行。
+- 开发环境为 Linux x86-64（宿主机 glibc ≥ 2.28；Pixi workspace 目前只声明 `linux-64`）。
+- 安装 Pixi，版本要求见 [pixi.toml](pixi.toml)（当前为 `>=0.84`）；其余工具（包括来自 `https://prefix.dev/seele-official/seele-os-toolchain` 的预构建 RISC-V 工具链）均由 Pixi 自动拉取。
 
 在项目根目录运行：
 
 ```bash
-# 首次使用：在独立工具链仓库中组装本地包 channel
-(cd toolchain && pixi run channel)
-
 # 安装项目依赖，构建并启动单 hart 内核
 pixi install
 pixi run qemu
 ```
 
 `qemu` 任务会自动安装脚本依赖、构建 `build/kernel.elf`、重建测试磁盘，再启动 QEMU。**每次运行都会覆盖对应构建目录的 `disk.img`，不要用它保存数据。**
-若 lock 文件中的本地 channel 路径来自其他机器，先按[构建文档](docs/build.md)重新解析工具链依赖。
+如需更新或从源码重建工具链包，见[构建文档](docs/build.md)。
 
 ### 验证启动
 

@@ -35,17 +35,17 @@ Defer detailed contracts to the docs above, but never violate these cross-cuttin
 
 All commands run from the repository root via Pixi ([pixi.toml](pixi.toml) is canonical). **Never bypass Pixi** with host compilers, CMake, Ninja, `clang-format`, `pnpm`, or QEMU; never hardcode `.pixi/envs/.../bin` paths or install duplicate dependencies.
 
-| Goal                              | Command                             | Notes                                                 |
-| --------------------------------- | ----------------------------------- | ----------------------------------------------------- |
-| Install workspace dependencies    | `pixi install`                      | Consumes local `./toolchain/.channel`                 |
-| Install Node/TS script deps       | `pixi run setup`                    | Runs `pnpm install`                                   |
-| Configure CMake                   | `pixi run configure`                | `[buildDir]` (default `build`); skips if cache exists |
-| Build `kernel.elf`                | `pixi run build`                    | `[buildDir]` (default `build`); runs `configure`      |
-| Run formatting & pre-commit       | `pixi run format`                   | Runs `pre-commit run --all-files` (tracked files)     |
-| Boot QEMU (1 hart / 4 harts)      | `pixi run qemu` / `pixi run qemu 4` | `[harts] [buildDir]` (default `1 build`)              |
-| Boot QEMU from another build dir  | `pixi run qemu 1 build-alt`         | Auto-runs `setup`, `build`, `disk`                    |
-| Regenerate 1 MiB virtio test disk | `pixi run disk`                     | `[buildDir]` (default `build`); overwrites `disk.img` |
-| Remove a build directory          | `pixi run clean <buildDir>`         | Runs `rm -rf`; never pass repo root or user dirs      |
+| Goal                              | Command                             | Notes                                                           |
+| --------------------------------- | ----------------------------------- | --------------------------------------------------------------- |
+| Install workspace dependencies    | `pixi install`                      | Consumes `https://prefix.dev/seele-official/seele-os-toolchain` |
+| Install Node/TS script deps       | `pixi run setup`                    | Runs `pnpm install`                                             |
+| Configure CMake                   | `pixi run configure`                | `[buildDir]` (default `build`); skips if cache exists           |
+| Build `kernel.elf`                | `pixi run build`                    | `[buildDir]` (default `build`); runs `configure`                |
+| Run formatting & pre-commit       | `pixi run format`                   | Runs `pre-commit run --all-files` (tracked files)               |
+| Boot QEMU (1 hart / 4 harts)      | `pixi run qemu` / `pixi run qemu 4` | `[harts] [buildDir]` (default `1 build`)                        |
+| Boot QEMU from another build dir  | `pixi run qemu 1 build-alt`         | Auto-runs `setup`, `build`, `disk`                              |
+| Regenerate 1 MiB virtio test disk | `pixi run disk`                     | `[buildDir]` (default `build`); overwrites `disk.img`           |
+| Remove a build directory          | `pixi run clean <buildDir>`         | Runs `rm -rf`; never pass repo root or user dirs                |
 
 - **Direct tool fallback.** Use `pixi run <tool> ...` only when no task covers the operation—for example, configuring a Debug build or changing existing CMake cache options:
 

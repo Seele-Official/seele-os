@@ -4,15 +4,13 @@
 
 ## 1. 准备工具链
 
-本仓库通过 [pixi.toml](../pixi.toml) 管理依赖，目前只支持 `linux-64` 开发环境，要求 Pixi `>=0.84`。RISC-V 工具链来自项目根目录下的独立仓库 `toolchain/`（`seele-toolchain`）；它不纳入本仓库，需要另外准备。
+本仓库通过 [pixi.toml](../pixi.toml) 管理依赖，目前只支持 `linux-64` 开发环境（宿主机 glibc ≥ 2.28），要求 Pixi `>=0.84`。RISC-V 交叉工具链托管在公开 prefix.dev channel `https://prefix.dev/seele-official/seele-os-toolchain`（配方维护在独立的 `seele-toolchain` 仓库中），直接安装即可：
 
 ```bash
-# 从项目根目录执行；toolchain/ 必须已经存在
-(cd toolchain && pixi run channel)
 pixi install
 ```
 
-本地 channel 提供两个固定版本包：
+远程 channel 提供两个固定版本包：
 
 | 包                              | 当前锁定版本 | 用途                    |
 | ------------------------------- | ------------ | ----------------------- |
@@ -21,17 +19,16 @@ pixi install
 
 CMake 按名字查找 `riscv64-unknown-elf-gcc/g++`；通过 `pixi run` 执行命令即可使用项目环境，不需要自行改宿主 `PATH`。工具链包是否含有某个库，与内核是否链接该库是两回事：当前内核不链接宿主 libc、libstdc++、libsupc++、libgcc 或 compiler-rt。
 
-### 更新工具链或迁移工作目录
+### 更新工具链包
 
-工具链仓库生成的 channel 位于 `toolchain/.channel`。修改工具链内容后先重新生成 channel；`pixi.lock` 中的本地 `file://` 包地址含绝对路径，换机器或移动目录后也需要重新解析相关依赖，不能只复制旧环境：
+当 `seele-toolchain` 发布新 build 或新版本到 `https://prefix.dev/seele-official/seele-os-toolchain` 后，在项目根目录只刷新工具链依赖（避免顺带升级所有依赖）：
 
 ```bash
-(cd toolchain && pixi run channel)
 pixi update riscv64-unknown-elf-gcc riscv64-unknown-elf-libstdcxx
 pixi install
 ```
 
-检查 lock 差异，确认工具链包地址指向当前工作目录；不要为修复本地路径而顺带升级所有依赖。工具链获取与打包方式以独立仓库自身的说明为准。
+检查 `pixi.lock` 差异，确认工具链包地址指向远程 channel 与预期版本。工具链源码构建与上传方式以 `seele-toolchain` 仓库自身的说明为准。
 
 ## 2. 构建与运行
 
