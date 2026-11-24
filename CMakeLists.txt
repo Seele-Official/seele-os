@@ -201,6 +201,8 @@ add_executable(kernel
     src/kernel/hart.cc
     src/kernel/stacktrace.cc
     src/kernel/concurrency/spinlock.cc
+    src/kernel/concurrency/wait_queue.cc
+    src/kernel/concurrency/semaphore.cc
     src/kernel/fdt/fdt.cc
     src/kernel/platform/early_console.cc
     src/kernel/platform/platform.cc

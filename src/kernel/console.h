@@ -7,10 +7,11 @@
 //   vprint()/vprintln() re-parse the same string_view at run time.
 // - Normal output: serialized per line under the console spinlock and submitted
 //   in chunks to the attached ConsoleSink without scheduling (safe in boot,
-//   trap, and interrupt contexts; full TX queues drain by polling).
-// - Panic output: after enter_panic(), all output bypasses locks and uses
-//   ConsoleSink::write_polled() so panic() cannot deadlock on console or device
-//   locks.
+//   trap, and interrupt contexts; full TX queues drain by polling). Dropped
+//   once panic mode is latched so surviving harts do not clutter crash output.
+// - Emergency output: print_emergency()/println_emergency()/vprint_emergency()
+//   always bypass locks and write straight to ConsoleSink::write_polled(), so
+//   panic() and stacktrace::print() cannot deadlock on console or device locks.
 // - Input: read() forwards locklessly to the attached CharDevice (char_device.h)
 //   so blocking waits never hold the console lock.
 
@@ -228,15 +229,29 @@ void attach_boot(ConsoleSink& sink) noexcept;
 [[nodiscard]] char read() noexcept;
 
 // Drain all accepted output to the attached ConsoleSink by polling until quiet.
-// Takes console + device locks (never schedules) in normal mode, and degrades
-// to lock-free flush_polled() during panic.
+// Takes console + device locks (never schedules). No-op once panic is latched.
 void flush() noexcept;
 
-// Latch panic mode: subsequent output bypasses locks via
-// ConsoleSink::write_polled(). The first call also invokes
-// ConsoleSink::enter_panic() and drains queued output via flush_polled();
-// subsequent calls are no-ops.
+// Latch panic mode and silence the attached sink's interrupts without taking
+// locks. Normal console output is dropped afterwards; panic callers print
+// through the dedicated emergency functions below.
 void enter_panic() noexcept;
+
+// Lock-free emergency output for panic() and stacktrace::print(). Always writes
+// directly via ConsoleSink::write_polled() without touching console or device
+// locks.
+void vprint_emergency(std::string_view fmt, format_args args) noexcept;
+void vprintln_emergency(std::string_view fmt, format_args args) noexcept;
+
+template <typename... Args>
+void print_emergency(format_string<Args...> fmt, Args&&... args) noexcept {
+    vprint_emergency(fmt.get(), make_format_args(args...));
+}
+
+template <typename... Args>
+void println_emergency(format_string<Args...> fmt, Args&&... args) noexcept {
+    vprintln_emergency(fmt.get(), make_format_args(args...));
+}
 
 void
     vlog(Level level, std::source_location source, std::string_view fmt, format_args args) noexcept;

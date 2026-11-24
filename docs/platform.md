@@ -103,21 +103,20 @@ secondary hart acquire 等待 `g_started`，不重复平台发现或驱动 probe
 
 正常输出锁顺序固定为 **`console → 设备锁`**，且永不调用调度器。
 
-| 操作             | Ns16550 行为                                                                                       |
-| ---------------- | -------------------------------------------------------------------------------------------------- |
-| `write()`        | 中断模式写入 128 字节 TX 环（环满则轮询排空后继续）；轮询模式直接写硬件                            |
-| `flush()`        | 持设备锁排空 TX 环并等待 `LSR.TEMT`（移位寄存器空）；不可从本设备中断处理器调用                    |
-| `write_polled()` | 无锁轮询写 THR，不触碰共享队列，供 panic 路径使用                                                  |
-| `flush_polled()` | 仅尝试获取设备锁，成功则尽力排空 TX 环（不等待 `TEMT`），拿不到锁立即返回                          |
-| `enter_panic()`  | 置设备 panic 闩锁并屏蔽 UART IER；并发写者随后转为轮询且不再重开中断，handler 停止服务，读端 panic |
+| 操作             | Ns16550 行为                                                                    |
+| ---------------- | ------------------------------------------------------------------------------- |
+| `write()`        | 持设备锁写入 128 字节 TX 环（环满则轮询排空后继续）；轮询模式直接写硬件         |
+| `flush()`        | 持设备锁排空 TX 环并等待 `LSR.TEMT`（移位寄存器空）；不可从本设备中断处理器调用 |
+| `write_polled()` | 无锁轮询写 THR，不触碰共享队列，供 panic 专用紧急输出通道使用                   |
+| `enter_panic()`  | 置设备 panic 闩锁并无锁屏蔽 UART IER，阻止并发路径重开电平触发中断              |
 
-`console::enter_panic()` 先通知设备，再发布 console 闩锁并在首次进入时调用 `flush_polled()`；正常写者获取 console 锁后会复查闩锁，阻止新排队行启动。panic 路径不等待锁，多 hart 并发输出可能交织。
+`console::enter_panic()` 发布 console 闩锁并调用 `sink->enter_panic()` 屏蔽设备中断。常规 `print()` / `flush()` 见闩锁后直接丢弃；`panic()` 与 `stacktrace::print()` 走专用无锁 `console::print_emergency()` / `println_emergency()` 直写 `write_polled()`，不触碰 console 或设备锁。
 
 ### 输入与调度器契约
 
-[ns16550.cc](../src/kernel/drivers/uart/ns16550.cc) 的 `Ns16550::read()` 要求：已有当前线程、`SIE = 1`、不持自旋锁、**`cpuid == 0`**，且同一时刻仅允许一个等待 reader。
+[ns16550.cc](../src/kernel/drivers/uart/ns16550.cc) 的 `Ns16550::read()` 要求：已有当前线程、`SIE = 1`、不持自旋锁、**`cpuid == 0`**。
 
-- **中断模式**：关中断并持设备锁读取 64 字节 RX 环（环空时先尝试读出硬件 FIFO）。若仍为空，在保持 `SIE = 0` 下登记 reader、释放设备锁并调用 `sched::sleep()`，消除丢失唤醒窗口；恢复后重开 `SIE` 并复查。接收 handler 写入 RX 环、**释放设备锁后**调用 `sched::wake(reader)`，由外部中断末尾的 `schedule()` 切换；`wake()` 仅作用于本 hart，要求 reader 与接收中断同 hart（调度契约见 [scheduling.md](scheduling.md)）。
+- **中断模式**：由 `Semaphore m_rx_sem` 统计 64 字节 RX 环中的可读字节数。`read()` 先调用 `m_rx_sem.acquire()` 阻塞等待名额，再持设备锁从 RX 环弹出 1 字节；接收 handler 写入 RX 环、**释放设备锁后**按入队字节数逐次调用 `m_rx_sem.release()`，由外部中断末尾的 `schedule()` 切换。因 PLIC 当前将 UART IRQ 路由到 hart 0 且尚无跨 hart 唤醒 IPI，`read()` 仍限定运行于 hart 0（调度与信号量契约见 [scheduling.md](scheduling.md)）。
 - **轮询回退**：无可用 IRQ 时不在调度器睡眠，而是开中断后执行 `wfi()` 等待定时器等中断唤醒再重试轮询。
 
 ### Early console 与 Ns16550 驱动

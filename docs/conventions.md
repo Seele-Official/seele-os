@@ -43,7 +43,7 @@
 
 ## 提交前
 
-- **格式化**：统一运行 `pixi run format`（覆盖 C/C++、TS、Markdown、JSON、YAML 及基础文本卫生）；未跟踪文件用 `pixi run pre-commit run --files <files>`。
+- **格式化**：统一运行 `pixi run format`（覆盖 C/C++、TS、Markdown、JSON、YAML 及基础文本）；未跟踪文件用 `pixi run pre-commit run --files <files>`。
 - **代码变更**：至少构建 Release 并在 QEMU 中验证受影响路径；涉及 ABI/libc/运行时或布局/并发不变量时，补跑 Debug 构建、核对 `nm -u` 输出及多 hart 启动（步骤见 [构建与运行](build.md)）。
 - **纯文档变更**：核对引用的命令、默认值、相对链接及格式化结果，不必机械重编译内核。
 - **说明变更与边界**：提交/交接时明确写出改动、已执行的验证及未覆盖路径，不把“编译通过”当作功能验证。

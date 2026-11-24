@@ -39,7 +39,10 @@ void begin_panic() noexcept {
 void print_position(const char* file, int line, const char* function) noexcept {
     const std::string_view name =
         file != nullptr ? console::file_basename(file) : std::string_view{"(unknown)"};
-    println("  at {}:{} in {}", name, line, function != nullptr ? function : "(unknown)");
+    console::println_emergency("  at {}:{} in {}",
+                               name,
+                               line,
+                               function != nullptr ? function : "(unknown)");
 }
 
 // The one printer behind SEELE_ASSERT / SEELE_DASSERT. The fields arrive split
@@ -51,19 +54,20 @@ void print_position(const char* file, int line, const char* function) noexcept {
                                    const char* condition,
                                    std::string_view fmt,
                                    format_args args) noexcept {
-    // From here on every line goes straight to the hardware by polling. That is
-    // what lets panic() print while it already holds the console lock or the
-    // UART lock, and why it never needs the scheduler or an interrupt.
+    // From here on every line goes through the dedicated lock-free emergency
+    // output path straight to hardware polling. That lets panic() report even
+    // while already holding the console or UART lock.
     begin_panic();
 
-    print("panic: assertion failed: {}", condition != nullptr ? condition : "(null)");
+    console::print_emergency("panic: assertion failed: {}",
+                             condition != nullptr ? condition : "(null)");
     if(!fmt.empty()) {
-        print(": ");
-        vprint(fmt, args);
+        console::print_emergency(": ");
+        console::vprint_emergency(fmt, args);
     }
-    println("");
+    console::println_emergency("");
     print_position(file, line, function);
-    println("stack trace:");
+    console::println_emergency("stack trace:");
     stacktrace::print();
     park();
 }
@@ -72,20 +76,20 @@ void print_position(const char* file, int line, const char* function) noexcept {
 
 extern "C" [[noreturn]] void panic(const char* message) {
     begin_panic();
-    println("panic: {}", message != nullptr ? message : "(null)");
-    println("stack trace:");
+    console::println_emergency("panic: {}", message != nullptr ? message : "(null)");
+    console::println_emergency("stack trace:");
     stacktrace::print();
     park();
 }
 
 void debug::vpanic(std::source_location location, std::string_view fmt, format_args args) noexcept {
     begin_panic();
-    print("panic: ");
-    vprintln(fmt, args);
+    console::print_emergency("panic: ");
+    console::vprintln_emergency(fmt, args);
     print_position(location.file_name(),
                    static_cast<int>(location.line()),
                    location.function_name());
-    println("stack trace:");
+    console::println_emergency("stack trace:");
     stacktrace::print();
     park();
 }

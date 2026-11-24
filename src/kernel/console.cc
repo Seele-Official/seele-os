@@ -23,16 +23,9 @@ std::atomic<ConsoleSink*> g_sink{nullptr};
 std::atomic<CharDevice*> g_input{nullptr};
 Spinlock g_lock{};
 
-// Latched by console::enter_panic() and never cleared. A writer checks it before
-// it takes the console lock and again once it owns it, then uses the polled path
-// for the whole line: the panic path must not depend on a lock or an interrupt,
-// and latching per line keeps the chunks of one line on a single path.
-//
-// The latch is published with release (the exchange is acq_rel) and read with
-// acquire: every hart that observes it must also observe the sink state the
-// first panic drained, and it must not start a normal line after the panic has
-// already taken over the device. The second check is what covers a writer that
-// was preempted between the first check and the lock acquisition.
+// Latched by console::enter_panic() and never cleared. Once set, normal output
+// and flush calls return without taking `g_lock` so surviving harts do not
+// clutter or contend with the panicking hart's emergency output.
 std::atomic<bool> g_panicking{false};
 
 // One staging chunk. Output is formatted into this buffer and handed to the
@@ -269,17 +262,17 @@ void vprint_common(std::string_view fmt,
     }
 }
 
-// The one entry every output function goes through.
-//
-// Acquires `g_lock` for the duration of the line unless `g_panicking` is
-// latched (checked before and after acquiring the lock via PanicLockGuard), in
-// which case output switches to the lock-free polled path.
+// Normal output path: drops lines once panic mode is latched; otherwise holds
+// `g_lock` for the duration of the line.
 void vprint_impl(std::string_view fmt,
                  format_args args,
                  bool newline,
                  std::optional<log_line> line) noexcept {
-    PanicLockGuard guard{g_lock, g_panicking, "console: recursive output"};
-    Writer out{!guard.locked()};
+    if(g_panicking.load(std::memory_order_acquire)) {
+        return;
+    }
+    LockGuard guard{g_lock};
+    Writer out{false};
     vprint_common(fmt, args, newline, line, out);
 }
 }  // namespace
@@ -322,27 +315,30 @@ char read() noexcept {
 }
 
 void flush() noexcept {
-    PanicLockGuard guard{g_lock, g_panicking, "console: recursive flush"};
+    if(g_panicking.load(std::memory_order_acquire)) {
+        return;
+    }
+    LockGuard guard{g_lock};
     if(ConsoleSink* sink = g_sink.load(std::memory_order_acquire); sink != nullptr) {
-        if(guard.locked()) {
-            sink->flush();
-        } else {
-            sink->flush_polled();
-        }
+        sink->flush();
     }
 }
 
 void enter_panic() noexcept {
-    ConsoleSink* const sink = g_sink.load(std::memory_order_acquire);
-    if(sink != nullptr) {
+    g_panicking.store(true, std::memory_order_release);
+    if(ConsoleSink* sink = g_sink.load(std::memory_order_acquire); sink != nullptr) {
         sink->enter_panic();
     }
+}
 
-    if(!g_panicking.exchange(true, std::memory_order_acq_rel)) {
-        if(sink != nullptr) {
-            sink->flush_polled();
-        }
-    }
+void vprint_emergency(std::string_view fmt, format_args args) noexcept {
+    Writer out{true};
+    vprint_common(fmt, args, false, std::nullopt, out);
+}
+
+void vprintln_emergency(std::string_view fmt, format_args args) noexcept {
+    Writer out{true};
+    vprint_common(fmt, args, true, std::nullopt, out);
 }
 
 void vlog(Level level,

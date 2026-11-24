@@ -39,21 +39,6 @@ public:
     // does not own the lock.
     void unlock() noexcept;
 
-    // Whether the current hart already owns this lock. try_lock() reports such a
-    // lock as "busy" rather than panicking (the panic path may not recurse into
-    // the misuse check), so a caller that retries with try_lock has no way to
-    // tell "another hart has it" from "this hart has it" without asking. A
-    // retry loop that sees true can never make progress and should report it.
-    [[nodiscard]] bool owned_by_current_hart() const noexcept;
-
-    // Acquire the lock only if it is free: true when this call owns it (with
-    // the same interrupt-disable bookkeeping as lock()), false when another
-    // hart owns it. A lock this hart already owns also reports false instead of
-    // panicking, because try_lock() exists for best-effort paths -- the panic
-    // path is allowed to continue without the lock rather than recurse into the
-    // misuse check. Never spins.
-    [[nodiscard]] bool try_lock() noexcept;
-
 private:
     // Sentinel for "no hart owns the lock". cpuid values are bounded by
     // MAX_HARTS, so the largest uint64_t cannot collide with a real one.

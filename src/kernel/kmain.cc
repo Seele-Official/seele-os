@@ -16,6 +16,7 @@
 #include "platform/platform.h"
 #include "proc/process.h"
 #include "proc/shell.h"
+#include "sched/schedule.h"
 #include "sched/switch.h"
 
 using namespace riscv;
@@ -134,7 +135,7 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
         // process. Queue it only when a readable console device is attached; an
         // output-only early sink leaves this hart running idle silently.
         if(console::can_read()) {
-            mycpu()->ready.push_back(proc::make_thread(mycpu()->system, &proc::shell));
+            sched::enqueue(proc::make_thread(mycpu()->system, &proc::shell));
         }
 
         g_started.store(true, std::memory_order_release);
@@ -154,9 +155,11 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
 
     SEELE_ASSERT(mycpu()->idle != nullptr, "proc: no idle thread to enter");
 
-    // The idle thread is the first thread this hart runs. Record it before the
-    // switch so mycpu()->current names the running thread from the moment the
-    // hart leaves the boot context.
+    // The idle thread is the first thread this hart runs. Bind it to this hart
+    // and mark it Running before the switch so mycpu()->current and thread
+    // state match from the moment the hart leaves the boot context.
+    mycpu()->idle->hart.store(mycpu(), std::memory_order_relaxed);
+    mycpu()->idle->state.store(proc::ThreadState::Running, std::memory_order_release);
     mycpu()->current = mycpu()->idle;
 
     // The boot context is disposable, not a thread of the system process.

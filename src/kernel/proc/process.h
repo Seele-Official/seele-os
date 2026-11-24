@@ -16,6 +16,8 @@
 #include "trap.h"
 #include "mm/addr.h"
 
+struct cpu;
+
 namespace proc {
 
 struct thread;
@@ -79,17 +81,54 @@ struct kernel_stack {
     uint64_t size;  // mapped bytes; the stack grows down from base + size
 };
 
+// Explicit scheduler lifecycle of a kernel thread.
+//
+// `Blocking` is the two-phase sleep intermediate state set by
+// sched::prepare_sleep() while local interrupts are disabled, before the
+// thread exposes itself to a waker. A concurrent sched::wake() that arrives
+// before sched::sleep() acquires the target hart's lock flips `Blocking` back
+// to `Running`, so sched::sleep() returns immediately without losing the wake.
+// Stored as uint32_t so RV64A word atomics operate natively without sub-word
+// masking loops.
+enum class ThreadState : uint32_t {
+    Created,   // newly allocated; not yet enqueued or entered
+    Ready,     // runnable on its bound hart (in `ready`, or parked idle)
+    Running,   // executing on its bound hart (`cpu->current == this`)
+    Blocking,  // preparing to sleep with local interrupts disabled
+    Blocked,   // parked in its bound hart's `sleeping` queue until woken
+};
+
+[[nodiscard]] constexpr const char* thread_state_name(ThreadState state) noexcept {
+    switch(state) {
+        case ThreadState::Created: return "created";
+        case ThreadState::Ready: return "ready";
+        case ThreadState::Running: return "running";
+        case ThreadState::Blocking: return "blocking";
+        case ThreadState::Blocked: return "blocked";
+    }
+    return "unknown";
+}
+
 // Scheduling unit: a resumable context and private stack within a process.
 // Kernel threads point at their hart's system process. Interrupt preemption
 // and voluntary sleep/yield preserve each thread's frames on its own stack.
+// `hart` points at the per-hart `cpu` that owns this thread's run queue, or
+// nullptr while the thread is still in `Created`.
 struct thread {
     process* proc;
     kernel_context context;
     kernel_stack kstack;
     trap::trap_frame frame;
+    std::atomic<ThreadState> state{ThreadState::Created};
+    std::atomic<::cpu*> hart{nullptr};
     thread* prev = nullptr;
     thread* next = nullptr;
 };
+
+static_assert(std::atomic<ThreadState>::is_always_lock_free,
+              "ThreadState atomics must not require libatomic helpers");
+static_assert(std::atomic<::cpu*>::is_always_lock_free,
+              "hart pointer atomics must not require libatomic helpers");
 
 static_assert(offsetof(kernel_context, ra) == 0);
 static_assert(offsetof(kernel_context, sp) == 8);

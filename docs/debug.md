@@ -33,7 +33,7 @@ stack trace:
   ...
 ```
 
-panic 入口先关闭本 hart 的 `sstatus.SIE`（防止定时器或外部中断在报告过程中切走当前线程与栈），再调用 `console::enter_panic()` 切入免等待锁的轮询输出，使已持锁代码、trap、中断及早期启动路径均可报告现场。报告完成后清空 `sie` 并循环 `wfi()` 停住当前 hart（不自动停止其他 hart）。
+panic 入口先关闭本 hart 的 `sstatus.SIE`（防止定时器或外部中断在报告过程中切走当前线程与栈），再调用 `console::enter_panic()` 屏蔽设备中断并使常规日志静默丢弃；随后 `panic()` 与 `stacktrace::print()` 通过专用无锁紧急输出通道（`console::print_emergency()` / `println_emergency()` → `ConsoleSink::write_polled()`）直接轮询输出，使已持锁代码、trap、中断及早期启动路径均可报告现场。报告完成后清空 `sie` 并循环 `wfi()` 停住当前 hart（不自动停止其他 hart）。
 
 [src/libc/stdlib.cc](../src/libc/stdlib.cc) 将 `abort()` 转发为 `panic("abort() called")`。Debug 构建启用 `_GLIBCXX_ASSERTIONS`，freestanding libstdc++ 前置条件失败（如空 `optional`/`expected` 或 `std::get()`）会经此路径停机。内核代码统一使用 `SEELE_UNREACHABLE()` 替代会产生 UB 的 `std::unreachable()`。
 

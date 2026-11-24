@@ -32,10 +32,8 @@ public:
     // shared queues that a halted hart may have left locked.
     virtual void write_polled(const char* data, std::size_t count) noexcept = 0;
 
-    // Best-effort drain for panic(): never blocks on a held lock.
-    virtual void flush_polled() noexcept = 0;
-
-    // Switch this backend permanently to its lock-free panic path.
+    // Mask device interrupts without taking locks so panic output is not
+    // disrupted by level-triggered IRQ storms.
     virtual void enter_panic() noexcept = 0;
 
 protected:

@@ -129,8 +129,10 @@ void print_info() noexcept {
         return;
     }
 
-    println("  current thread {:#018x} in process {:#018x}, {} thread(s)",
+    println("  current thread {:#018x} (state={}, cpu={:#018x}) in process {:#018x}, {} thread(s)",
             to_uint64(vaddr(thread)),
+            proc::thread_state_name(thread->state.load(std::memory_order_relaxed)),
+            to_uint64(vaddr(thread->hart.load(std::memory_order_relaxed))),
             to_uint64(vaddr(thread->proc)),
             thread->proc->thread_count.load());
     println("  kstack [{:#018x}, {:#018x}), {} bytes",

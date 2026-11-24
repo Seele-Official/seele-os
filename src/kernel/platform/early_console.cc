@@ -53,8 +53,6 @@ public:
         }
     }
 
-    void flush_polled() noexcept override {}
-
     void enter_panic() noexcept override {}
 
 private:

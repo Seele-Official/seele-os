@@ -62,34 +62,6 @@ void Spinlock::lock() noexcept {
     }
 }
 
-bool Spinlock::owned_by_current_hart() const noexcept {
-    return m_owner.load(std::memory_order_relaxed) == cpuid();
-}
-
-bool Spinlock::try_lock() noexcept {
-    // Fast-fail if already held (including by this hart, which must report
-    // busy rather than panicking so best-effort panic paths cannot recurse).
-    if(m_owner.load(std::memory_order_relaxed) != NO_OWNER) {
-        return false;
-    }
-
-    const uint64_t self = cpuid();
-    push_off();
-
-    uint64_t expected = NO_OWNER;
-    if(!m_owner.compare_exchange_strong(expected,
-                                        self,
-                                        std::memory_order_acquire,
-                                        std::memory_order_relaxed)) {
-        // Another hart won the race. Undo the local interrupt bookkeeping
-        // before reporting failure so interrupts are not left disabled.
-        pop_off();
-        return false;
-    }
-
-    return true;
-}
-
 void Spinlock::unlock() noexcept {
     SEELE_ASSERT(m_owner.load(std::memory_order_relaxed) == cpuid(),
                  "spinlock {:#018x}: unlock by a hart that does not own it",

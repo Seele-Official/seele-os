@@ -95,7 +95,7 @@ void stacktrace::print() noexcept {
             return;
         }
 
-        println("  #{} {:#018x}", depth, frame.ra);
+        console::println_emergency("  #{} {:#018x}", depth, frame.ra);
 
         // The stack grows down, so a caller's frame pointer is strictly above
         // the current one. Anything else is the end of the chain: _entry never
@@ -106,5 +106,5 @@ void stacktrace::print() noexcept {
         fp = frame.fp;
     }
 
-    println("  ... truncated at {} frames", MAX_DEPTH);
+    console::println_emergency("  ... truncated at {} frames", MAX_DEPTH);
 }

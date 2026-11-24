@@ -37,11 +37,9 @@ constexpr std::size_t MAX_DEPTH = 32;
 //
 //   riscv64-unknown-elf-addr2line -f -C -i -e build/kernel.elf 0x800012a4
 //
-// Never allocates. It does print: through the console's asynchronous path, which
-// takes the console lock with interrupts disabled, or through the lock-free panic
-// path once a panic has started. Printing while this hart already holds the
-// console lock is a bug the writer reports instead of spinning on it (console.cc,
-// "recursive output").
+// Never allocates and never takes locks: prints directly through
+// console::println_emergency(), so it is safe from panic(), traps, and code
+// holding the console or device lock.
 void print() noexcept;
 
 }  // namespace stacktrace
