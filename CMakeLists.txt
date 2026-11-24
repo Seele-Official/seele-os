@@ -56,16 +56,6 @@ set(SEELE_LINKER_SCRIPT
 # keeps cpus[], the pool layout and start.S from drifting apart. Kernel stacks
 # are per process, not per hart, so they are not bounded by this number.
 set(SEELE_MAX_HARTS 64 CACHE STRING "Maximum number of harts, cpuid slots and boot stacks")
-
-# The former per-pool knob is gone: the pool is sized by SEELE_MAX_HARTS. A stale
-# -D or a cache entry from an older build would otherwise be ignored with a
-# generic "unused variable" warning.
-if(DEFINED SEELE_BOOT_STACK_HARTS)
-    message(FATAL_ERROR
-        "seele: SEELE_BOOT_STACK_HARTS no longer exists; it was merged into SEELE_MAX_HARTS "
-        "so that cpus[] and the boot stack pool share one bound. Drop the flag, or clear the "
-        "stale cache entry with -U SEELE_BOOT_STACK_HARTS.")
-endif()
 set(SEELE_BOOT_STACK_SIZE 65536 CACHE STRING "Stack size of the boot hart's boot stack, in bytes")
 set(SEELE_SECONDARY_STACK_SIZE 8192 CACHE STRING "Boot stack size of every secondary hart, in bytes")
 set(SEELE_KSTACK_SIZE 16384 CACHE STRING "Kernel stack each process maps, in bytes")
@@ -138,21 +128,6 @@ if(SEELE_MAX_RESOURCES GREATER 65535)
     message(FATAL_ERROR
         "seele: SEELE_MAX_RESOURCES (${SEELE_MAX_RESOURCES}) does not fit the uint16_t "
         "resource fields in platform/device.h (at most 65535)")
-endif()
-
-# The boot stack pool is one boot stack plus (SEELE_MAX_HARTS - 1) secondary
-# slices, so a hart count of 1 would ask for a zero-sized array, which ISO C++
-# does not have.
-if(SEELE_MAX_HARTS LESS 2)
-    message(FATAL_ERROR
-        "seele: SEELE_MAX_HARTS (${SEELE_MAX_HARTS}) must be at least 2: the boot stack pool "
-        "is one boot stack plus one slice per secondary hart")
-endif()
-if(NOT SEELE_BOOT_STACK_SIZE GREATER SEELE_SECONDARY_STACK_SIZE)
-    message(FATAL_ERROR
-        "seele: SEELE_BOOT_STACK_SIZE (${SEELE_BOOT_STACK_SIZE}) must be larger than "
-        "SEELE_SECONDARY_STACK_SIZE (${SEELE_SECONDARY_STACK_SIZE}): the boot hart runs the "
-        "whole boot path on its stack")
 endif()
 if(SEELE_UART_BAUD GREATER 4000000)
     # 16 * baud must fit the 16-bit divisor the LCR bank takes, so anything
@@ -239,8 +214,8 @@ add_executable(kernel
     src/kernel/mm/vm.cc
     src/kernel/proc/process.cc
     src/kernel/proc/shell.cc
-    src/kernel/shed/switch.S
-    src/kernel/shed/schedule.cc
+    src/kernel/sched/switch.S
+    src/kernel/sched/schedule.cc
     src/cxx/runtime.cc
 )
 
@@ -275,11 +250,11 @@ target_link_options(kernel PRIVATE
     -Wl,-T,${SEELE_LINKER_SCRIPT}
     -Wl,--gc-sections
     -Wl,--build-id=none
-    -Wl,--no-warn-rwx-segments
 )
 
 # The kernel's own C library. It is a separate static library so it can grow
-# its own surface (add files here)
+# its own surface (add files here). -fno-builtin prevents the compiler from
+# turning libc implementations into recursive calls to themselves.
 add_library(seele_libc STATIC
     src/libc/string.cc
     src/libc/stdlib.cc
@@ -287,10 +262,7 @@ add_library(seele_libc STATIC
 target_include_directories(seele_libc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src/libc/include")
 target_compile_options(seele_libc PRIVATE
     ${SEELE_COMPILE_OPTIONS}
-    -fno-builtin-strncpy -fno-builtin-strncmp -fno-builtin-strlen -fno-builtin-memset
-    -fno-builtin-memmove -fno-builtin-memcmp -fno-builtin-log -fno-builtin-bzero
-    -fno-builtin-strchr -fno-builtin-exit -fno-builtin-malloc -fno-builtin-putc
-    -fno-builtin-free -fno-builtin-memcpy
+    -fno-builtin
 )
 
 target_link_libraries(kernel PRIVATE seele_libc)

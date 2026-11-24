@@ -1,70 +1,17 @@
 #pragma once
 
-// Two doubly linked lists built on one link engine.
+// Intrusive and heap-owning circular doubly linked lists (O(1) push/pop/erase).
 //
-// IntrusiveList<T> chains the caller's objects together: T must expose `next` and
-// `prev` as T*, which the intrusive_node concept checks at the point of
-// instantiation. Linking allocates nothing and owns nothing, and erasing an
-// element works from the element alone, so a node costs two words whichever
-// container it belongs to. Every push, insert and erase below is O(1).
+// - IntrusiveList<T>: non-owning, zero-allocation, trivially destructible
+//   (safe in static storage). Requires public `T* next` and `T* prev` on T.
+//   Pointer-based API returns nullptr when empty.
+// - List<T>: owning wrapper built on IntrusiveList<node>; allocates nodes via
+//   the kernel heap (sizeof/alignof <= heap::MAX_SIZE; panics on OOM). Non-
+//   trivial destructor forbids namespace-scope static storage (no __cxa_atexit).
 //
-// The intrusive surface is pointer-based: the inserting and erasing operations
-// take T*, and an empty pop_front()/pop_back()/front()/back() returns nullptr.
-// A caller that does not know whether anything is queued can therefore ask and
-// remove in one call instead of testing empty() first.
-//
-// The links form a ring with no sentinel object: `m_head` names the first
-// element, the last element's next points back at the first, and the first
-// element's prev points at the last. An empty list is `m_head == nullptr`, and a
-// node that is not in a list has both links null. A sentinel *object* would have
-// had to be a T, which would force every element type to be default-constructible
-// and would put a fake element in the object's footprint; keeping just a head
-// pointer avoids both. The cost is that end() is not a real node but a null
-// iterator that remembers its list, which is what lets `--end()` still name the
-// last element and `++last` become end() again.
-//
-// The list is circular, so every insertion and removal below is the same four
-// stores regardless of which end the caller touched. A node must be unlinked
-// before it is pushed; the link state is a caller bug, checked with SEELE_ASSERT
-// rather than silently repaired. A node passed to erase(), insert_before() or
-// insert_after() must belong to this list. There is no back-pointer from a node
-// to its list, so membership cannot be checked cheaply and remains a documented
-// precondition (erase() can only catch a singleton from another list). Node
-// fields are public by design: the list is the link mechanism, not the element's
-// owner.
-//
-// List<T> is the owning form, implemented on top of IntrusiveList rather than a
-// second set of link operations. Each element is a heap node holding the two links
-// followed by the T, so an empty List<T> does not need a T; push_front/push_back
-// allocate from the kernel heap, and pop/clear/destruction delete. The heap cannot
-// fail a `new` expression -- the kernel runs with exceptions off and operator new
-// panics on exhaustion (mm/heap.cc) -- so a push either succeeds or stops the
-// hart; there is no empty-result state to inspect. A node has to fit the heap's
-// largest size class, which MAX_SIZE bounds, so the static_assert below rejects a
-// List<T> whose T is too large to allocate at compile time instead of failing the
-// boot on the first push.
-//
-// There is deliberately no middle insertion-for-List, erase-for-List, splice,
-// sort or resize. A caller that needs a queue, a run queue or a wait list only
-// ever touches the ends; adding an iterator-based erase to the owning list would
-// expose an invalidation contract and a failure mode this kernel does not need
-// yet. An intrusive caller that needs to remove an arbitrary node has erase().
-//
-// Iterators are bidirectional. For both containers begin() is the first element
-// and end() is the null iterator; a mutable iterator converts to a const one.
-// Inserting or removing at an end does not invalidate iterators to other nodes;
-// the iterator to the node a pop/erase removed, and the iterator that referenced
-// the list's end() after a clear(), are the only ones that go stale. Comparison
-// between mutable and const iterators is supported in both orders.
-//
-// Copy and move are deleted for both types: the nodes are shared (intrusive) or
-// owned (List), and either would need a deep copy or a sentinel rebuild that
-// nothing in the kernel asks for yet. A list that must be handed from one owner
-// to another belongs behind a pointer instead.
-//
-// A list carries no lock of its own. It is a plain data structure, so the owner
-// serializes access with its own Spinlock when it can be reached from more than
-// one hart at a time.
+// Both types are non-copyable, non-movable, and unsynchronized (callers provide
+// external locking). Iterators are bidirectional; insertion/removal invalidates
+// only iterators to removed nodes.
 
 #include <concepts>
 #include <cstddef>
@@ -75,26 +22,15 @@
 #include "panic.h"
 #include "mm/heap.h"
 
-// The link contract shared by every list in this header. A node is intrusive
-// precisely because the links live in the caller's object; requiring the members
-// to be exactly T* (rather than merely convertible to T*) keeps the ordinary
-// object pointer usable as the node pointer, so no offset or container_of cast is
-// involved.
 template <typename T>
 concept intrusive_node = requires(T& node) {
     requires std::same_as<decltype(node.next), T*>;
     requires std::same_as<decltype(node.prev), T*>;
 };
 
-// An intrusive doubly linked list over T. The caller creates and destroys the T
-// objects; this list only writes their `next` and `prev` fields. The list itself
-// is two words (head pointer plus element count) and has a trivial destructor, so
-// it can live in static storage without registering a static destructor.
-//
-// Nodes must outlive their membership: destroying a list without clear()/erase()
-// leaves the nodes linked in their ring, which owns nothing but makes them
-// unavailable to another list until they are unlinked. The list never dereferences
-// a node it was not handed.
+// Non-owning circular doubly linked list with no sentinel object (`m_head ==
+// nullptr` when empty; unlinked nodes have null links). Caller owns node
+// lifetimes; destroying a non-empty list leaves nodes linked.
 template <intrusive_node T>
 class IntrusiveList {
 private:
@@ -229,9 +165,7 @@ public:
         return m_size;
     }
 
-    // The first/last node, or nullptr when there is none. These return the node
-    // rather than a reference into it because the list is a link mechanism; the
-    // caller already has the object and only needs to know where it sits.
+    // First/last node, or nullptr when empty.
     [[nodiscard]] pointer front() noexcept {
         return m_head;
     }
@@ -248,8 +182,7 @@ public:
         return m_head == nullptr ? nullptr : m_head->prev;
     }
 
-    // Insert an unlinked node at the front or the back. The list does not copy
-    // the node: the caller keeps ownership and must keep it alive while linked.
+    // Push an unlinked non-null node; asserts on null or already-linked nodes.
     void push_front(T* node) {
         SEELE_ASSERT(node != nullptr, "IntrusiveList::push_front(nullptr)");
         require_unlinked(node);
@@ -274,9 +207,7 @@ public:
         }
     }
 
-    // Insert `node` next to `position`, which must be an element of this list.
-    // insert_before() at the first element and insert_after() at the last are
-    // therefore the two end insertions, expressed at an existing node.
+    // Insert unlinked `node` adjacent to `position` (must belong to this list).
     void insert_before(T* position, T* node) {
         SEELE_ASSERT(position != nullptr, "IntrusiveList::insert_before(nullptr)");
         SEELE_ASSERT(node != nullptr, "IntrusiveList::insert_before(nullptr)");
@@ -304,10 +235,7 @@ public:
         ++m_size;
     }
 
-    // Unlink the first/last node and return it to the caller, or return nullptr
-    // when the list is empty. The node is not destroyed: its links are null again
-    // and its lifetime remains the caller's. A pointer result and the null-on-
-    // empty rule make both parts of that contract visible in the signature.
+    // Unlink and return the first/last node, or nullptr when empty.
     [[nodiscard]] T* pop_front() noexcept {
         return empty() ? nullptr : take(m_head);
     }
@@ -316,10 +244,7 @@ public:
         return empty() ? nullptr : take(m_head->prev);
     }
 
-    // Unlink an element chosen by the caller. This is the operation an intrusive
-    // list exists for: it needs no iterator and no search. A null pointer is
-    // "nothing to unlink" and is a no-op, which lets a caller pass an optional
-    // link without testing it first.
+    // Unlink `node` (must belong to this list); nullptr is a no-op.
     void erase(T* node) noexcept {
         if(node == nullptr) {
             return;
@@ -343,8 +268,7 @@ public:
         --m_size;
     }
 
-    // Unlink every element, leaving the list empty. It does not destroy the
-    // nodes and does not run T destructors: ownership stays with the caller.
+    // Unlink every node without destroying them.
     void clear() noexcept {
         if(empty()) {
             return;
@@ -420,27 +344,17 @@ private:
 template <typename T>
 class List {
 private:
-    // A node is the caller's value preceded by the link pair that
-    // IntrusiveList<node> writes. The links are first so the intrusive list's
-    // node pointer is the owning list's node pointer, and an empty List<T> needs
-    // no T: the head is a pointer, not a sentinel node.
     struct node {
         node* next = nullptr;
         node* prev = nullptr;
-        T m_value;
+        T value;
     };
 
-    // List<T> has one link implementation, not two: its node satisfies the same
-    // concept the intrusive list imposes. If that ever stops holding, this
-    // instantiation fails here rather than in a template error deep in a push.
     static_assert(intrusive_node<node>,
                   "List's node must satisfy the intrusive list's link contract");
 
     using Links = IntrusiveList<node>;
 
-    // node is one `new` expression, and the heap has no size class above
-    // MAX_SIZE: a larger node would panic inside operator new at the first push.
-    // Reject it when the List is instantiated instead.
     static_assert(sizeof(node) <= heap::MAX_SIZE,
                   "a List node must fit the kernel heap's largest size class");
     static_assert(alignof(node) <= heap::MAX_SIZE,
@@ -455,9 +369,7 @@ public:
     using pointer = T*;
     using const_pointer = const T*;
 
-    // The owning iterator wraps the intrusive iterator and projects node to
-    // node->m_value. It is still bidirectional, and the inner iterator's end()
-    // keeps the list pointer, so --end() reaches the last value.
+    // Wraps IntrusiveList<node>::Iterator and projects node to node->value.
     template <bool IsConst>
     class Iterator {
         friend class List;
@@ -478,11 +390,11 @@ public:
         Iterator(const Iterator<OtherIsConst>& other) noexcept : m_iterator(other.m_iterator) {}
 
         [[nodiscard]] reference operator* () const noexcept {
-            return m_iterator->m_value;
+            return m_iterator->value;
         }
 
         [[nodiscard]] pointer operator->() const noexcept {
-            return &m_iterator->m_value;
+            return &m_iterator->value;
         }
 
         Iterator& operator++ () noexcept {
@@ -531,8 +443,8 @@ public:
 
     List() noexcept = default;
 
-    // Nodes are owned, so leaving a list destroys them. This is not a static
-    // storage-friendly type: see the note at the end of the file.
+    // Non-trivial destructor: do not place List in namespace-scope static
+    // storage (the kernel provides no atexit/__cxa_atexit).
     ~List() noexcept {
         clear();
     }
@@ -553,29 +465,27 @@ public:
     [[nodiscard]] reference front() noexcept {
         node* first = m_nodes.front();
         SEELE_ASSERT(first != nullptr, "List::front on an empty list");
-        return first->m_value;
+        return first->value;
     }
 
     [[nodiscard]] const_reference front() const noexcept {
         const node* first = m_nodes.front();
         SEELE_ASSERT(first != nullptr, "List::front on an empty list");
-        return first->m_value;
+        return first->value;
     }
 
     [[nodiscard]] reference back() noexcept {
         node* last = m_nodes.back();
         SEELE_ASSERT(last != nullptr, "List::back on an empty list");
-        return last->m_value;
+        return last->value;
     }
 
     [[nodiscard]] const_reference back() const noexcept {
         const node* last = m_nodes.back();
         SEELE_ASSERT(last != nullptr, "List::back on an empty list");
-        return last->m_value;
+        return last->value;
     }
 
-    // Insert at the front or the back. The node is allocated before the list is
-    // touched, so a panic from the heap leaves the list exactly as it was.
     void push_front(const T& value) {
         push_front_node(value);
     }
@@ -592,10 +502,7 @@ public:
         push_back_node(std::move(value));
     }
 
-    // Remove the first/last element and destroy it. Popping is a caller bug when
-    // the list is empty; like the heap's free(), it is checked in every build
-    // rather than silently doing nothing, because the list would otherwise be
-    // corrupted.
+    // Remove and destroy the first/last element; panics if empty.
     void pop_front() noexcept {
         node* element = m_nodes.pop_front();
         SEELE_ASSERT(element != nullptr, "List::pop_front on an empty list");
@@ -608,9 +515,6 @@ public:
         delete element;
     }
 
-    // Destroy every element, leaving the list empty. Iterators into the removed
-    // elements are invalid afterwards; end() remains equal to end(). pop_front()
-    // returning nullptr is the loop's natural stop condition.
     void clear() noexcept {
         while(node* element = m_nodes.pop_front()) {
             delete element;
@@ -658,13 +562,3 @@ private:
 
     Links m_nodes;
 };
-
-// A List has a non-trivial destructor, and GCC registers a destructor for every
-// namespace-scope object with one (GCC has no -fno-c++-static-destructors). The
-// kernel currently provides neither atexit nor __cxa_atexit, so a static List
-// would fail to link. Keep Lists in automatic storage, or reach a static one
-// through a pointer (which does not register a destructor), until the libc
-// grows those entry points.
-//
-// IntrusiveList has no such restriction: its destructor is trivial, and its
-// nodes are the caller's, so a static IntrusiveList links without an exit hook.

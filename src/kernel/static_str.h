@@ -70,7 +70,7 @@ struct StaticString {
 };
 
 template <size_t N, size_t... Ns>
-constexpr inline size_t formatted_capacity = N + (0 + ... + (Ns - 1));
+constexpr size_t formatted_capacity = N + (0 + ... + (Ns - 1));
 
 // Compile-time formatting: each "{}" is replaced by the next argument string,
 // left to right. Like std::format, the literal is parsed where the argument

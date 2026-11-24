@@ -10,12 +10,9 @@
 #include <variant>
 
 #include "format_spec.h"
-#include "hart.h"
 #include "panic.h"
-#include "riscv.h"
 #include "concurrency/lock_guard.h"
 #include "concurrency/spinlock.h"
-#include "shed/schedule.h"
 
 namespace {
 
@@ -51,14 +48,14 @@ constexpr size_t WRITE_CHUNK = 64;
 // construction so that a panic that starts on another hart cannot split this
 // line between the queue and the hardware. The destructor submits the last
 // partial chunk, which is why every call site only has to write the line.
-class writer {
+class Writer {
 public:
-    explicit writer(bool is_polled) noexcept : m_is_polled(is_polled) {}
+    explicit Writer(bool is_polled) noexcept : m_is_polled(is_polled) {}
 
-    writer(const writer&) = delete;
-    writer& operator= (const writer&) = delete;
+    Writer(const Writer&) = delete;
+    Writer& operator= (const Writer&) = delete;
 
-    ~writer() noexcept {
+    ~Writer() noexcept {
         flush();
     }
 
@@ -79,7 +76,7 @@ public:
         if(m_count == 0) {
             return;
         }
-        if(ConsoleSink* sink = g_sink.load(std::memory_order_relaxed); sink != nullptr) {
+        if(ConsoleSink* sink = g_sink.load(std::memory_order_acquire); sink != nullptr) {
             if(m_is_polled) {
                 sink->write_polled(m_stage, m_count);
             } else {
@@ -106,7 +103,7 @@ constexpr size_t MAX_DIGITS = 64;
 void write_integer(uint64_t magnitude,
                    bool negative,
                    const format_spec& spec,
-                   writer& out) noexcept {
+                   Writer& out) noexcept {
     constexpr char LOWER_DIGITS[] = "0123456789abcdef";
     constexpr char UPPER_DIGITS[] = "0123456789ABCDEF";
     const char* digits = spec_uppercase(spec) ? UPPER_DIGITS : LOWER_DIGITS;
@@ -150,7 +147,7 @@ void write_integer(uint64_t magnitude,
     }
 }
 
-void write_unsigned(uint64_t value, writer& out) noexcept {
+void write_unsigned(uint64_t value, Writer& out) noexcept {
     write_integer(value, false, format_spec{}, out);
 }
 
@@ -158,7 +155,7 @@ void write_unsigned(uint64_t value, writer& out) noexcept {
 // the four integer widths, so the visitor only has to tell those three shapes
 // apart; the integers are widened back to the full width and written with the
 // spec parsed for this placeholder.
-void write_arg(const format_arg& arg, const format_spec& spec, writer& out) noexcept {
+void write_arg(const format_arg& arg, const format_spec& spec, Writer& out) noexcept {
     std::visit(
         [&spec, &out](const auto& value) {
             using value_type = std::remove_cvref_t<decltype(value)>;
@@ -191,18 +188,6 @@ void write_arg(const format_arg& arg, const format_spec& spec, writer& out) noex
     return "[UNKNOWN] ";
 }
 
-// "src/kernel/kmain.cc" becomes "kmain.cc": a log line keeps the interesting part
-// of the path no matter how the build spells it. The view is sliced by hand
-// instead of with substr(), whose range check would drag an exception path into
-// the kernel.
-[[nodiscard]] constexpr std::string_view file_basename(std::string_view file) noexcept {
-    const size_t slash = file.find_last_of('/');
-    if(slash == std::string_view::npos) {
-        return file;
-    }
-    return std::string_view{file.data() + slash + 1, file.size() - slash - 1};
-}
-
 // What a log line adds to its message: the level tag and the position the call
 // came from. The two are always known or absent together, so they travel as one
 // value; print() and println() pass an empty optional and get no prefix. The
@@ -226,11 +211,11 @@ void vprint_common(std::string_view fmt,
                    format_args args,
                    bool newline,
                    std::optional<log_line> line,
-                   writer& out) noexcept {
+                   Writer& out) noexcept {
     if(line.has_value()) {
         out.append(level_tag(line->level));
         if(line->source.line() != 0) {
-            out.append(file_basename(line->source.file_name()));
+            out.append(console::file_basename(line->source.file_name()));
             out.putc(':');
             write_unsigned(line->source.line(), out);
             out.append(": ");
@@ -286,43 +271,16 @@ void vprint_common(std::string_view fmt,
 
 // The one entry every output function goes through.
 //
-// A writer normally takes the console lock for the duration of its line. The
-// lock is deliberately taken with try_lock in a loop instead of with lock():
-// a hart that panics inside the console never releases the lock, and a writer
-// that started just before the panic would otherwise spin forever (with
-// interrupts off, on the harts that are still running). Re-reading the latch
-// on every failed attempt is what turns that wait into the lock-free path.
+// Acquires `g_lock` for the duration of the line unless `g_panicking` is
+// latched (checked before and after acquiring the lock via PanicLockGuard), in
+// which case output switches to the lock-free polled path.
 void vprint_impl(std::string_view fmt,
                  format_args args,
                  bool newline,
                  std::optional<log_line> line) noexcept {
-    while(true) {
-        if(g_panicking.load(std::memory_order_acquire)) {
-            writer out{true};
-            vprint_common(fmt, args, newline, line, out);
-            return;
-        }
-
-        TryLockGuard guard{g_lock};
-        if(guard.locked()) {
-            // The latch can be set between the check above and this
-            // acquisition (the writer may have been preempted in between).
-            // Re-read it under the lock: a line committed after a panic must
-            // use the polled path too, not the buffered one the panic just
-            // drained.
-            const bool is_polled = g_panicking.load(std::memory_order_acquire);
-            writer out{is_polled};
-            vprint_common(fmt, args, newline, line, out);
-            return;
-        }
-
-        // try_lock reports a lock this hart already owns as busy, so that the
-        // panic path does not recurse into the misuse check. Here that would be
-        // a writer inside the console critical section: retrying can never
-        // succeed, and unlike lock() the misuse check never runs. Say so
-        // instead; the panic path is lock-free, so this reports cleanly.
-        SEELE_ASSERT(!g_lock.owned_by_current_hart(), "console: recursive output");
-    }
+    PanicLockGuard guard{g_lock, g_panicking, "console: recursive output"};
+    Writer out{!guard.locked()};
+    vprint_common(fmt, args, newline, line, out);
 }
 }  // namespace
 
@@ -364,27 +322,13 @@ char read() noexcept {
 }
 
 void flush() noexcept {
-    while(true) {
-        if(g_panicking.load(std::memory_order_acquire)) {
-            if(ConsoleSink* sink = g_sink.load(std::memory_order_acquire); sink != nullptr) {
-                sink->flush_polled();
-            }
-            return;
-        }
-
-        TryLockGuard guard{g_lock};
+    PanicLockGuard guard{g_lock, g_panicking, "console: recursive flush"};
+    if(ConsoleSink* sink = g_sink.load(std::memory_order_acquire); sink != nullptr) {
         if(guard.locked()) {
-            const bool is_polled = g_panicking.load(std::memory_order_acquire);
-            if(ConsoleSink* sink = g_sink.load(std::memory_order_relaxed); sink != nullptr) {
-                if(is_polled) {
-                    sink->flush_polled();
-                } else {
-                    sink->flush();
-                }
-            }
-            return;
+            sink->flush();
+        } else {
+            sink->flush_polled();
         }
-        SEELE_ASSERT(!g_lock.owned_by_current_hart(), "console: recursive flush");
     }
 }
 

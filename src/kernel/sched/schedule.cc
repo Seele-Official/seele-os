@@ -1,11 +1,12 @@
+#include "sched/schedule.h"
 
 #include "hart.h"
 #include "panic.h"
 #include "riscv.h"
-#include "switch.h"
 #include "concurrency/lock_guard.h"
+#include "sched/switch.h"
 
-namespace shed {
+namespace sched {
 using namespace riscv;
 using namespace riscv::registers;
 
@@ -29,11 +30,11 @@ void helper() noexcept {
         if constexpr(sleep) {
             // The idle thread is what the hart falls back to; it never sleeps,
             // or the hart would have no thread to switch to.
-            SEELE_ASSERT(current != cpu->idle, "shed::sleep() from the idle thread");
+            SEELE_ASSERT(current != cpu->idle, "sched::sleep() from the idle thread");
             // A running thread must not also be the next ready thread. This
             // check does not detect lost wakes: callers must prevent a wake
             // between checking their condition and entering the sleeping list.
-            SEELE_ASSERT(next != current, "shed::sleep(): a wake() arrived too early");
+            SEELE_ASSERT(next != current, "sched::sleep(): a wake() arrived too early");
 
             if(next == nullptr) {
                 next = cpu->idle;
@@ -80,4 +81,4 @@ void wake(proc::thread* thread) noexcept {
     }
 }
 
-}  // namespace shed
+}  // namespace sched

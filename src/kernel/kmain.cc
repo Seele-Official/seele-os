@@ -16,7 +16,7 @@
 #include "platform/platform.h"
 #include "proc/process.h"
 #include "proc/shell.h"
-#include "shed/switch.h"
+#include "sched/switch.h"
 
 using namespace riscv;
 using namespace riscv::registers;
@@ -34,14 +34,14 @@ void cxx_init() {
     }
 }
 
-// Secondaries read this while hart 0 is still booting, before clear_bss() has
+// Secondaries read this while hart 0 is still booting, before cxx_init() has
 // run. constinit only guarantees constant initialization; it does not choose a
 // section, and a zero-valued constinit object still lands in .bss/.sbss with
 // this toolchain. The section attribute is what puts the flag in the loaded
 // segment, so its initial value is well defined even if the loader does not
 // zero .bss. On QEMU the loader does zero it, so this is belt and suspenders,
 // not a fix for an observed failure.
-constinit static std::atomic<bool> started __attribute__((section(".data"))) = false;
+static constinit std::atomic<bool> g_started __attribute__((section(".data"))) = false;
 
 // Called from idle() only after switching to that thread's kernel stack; the
 // abandoned boot context must never resume after these pages are released.
@@ -137,12 +137,12 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
             mycpu()->ready.push_back(proc::make_thread(mycpu()->system, &proc::shell));
         }
 
-        started.store(true, std::memory_order_release);
+        g_started.store(true, std::memory_order_release);
     } else {
         // Acquire the shared mappings before creating this hart's system
         // process. Its kernel threads use a private stack subtree while sharing
         // the kernel image, direct map and heap with the other harts.
-        while(!started.load(std::memory_order_acquire)) {}
+        while(!g_started.load(std::memory_order_acquire)) {}
         mycpu()->hartid = hartid;
         const Paddr pagetable = vm::k::create_process_pagetable();
 
@@ -163,7 +163,7 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
     // Its null process pointer forces switch_thread() to load the target satp,
     // which is already active. Do not enqueue or resume `old`.
     proc::thread old{};
-    shed::switch_thread(&old, mycpu()->idle);
+    sched::switch_thread(&old, mycpu()->idle);
 
     // Reaching here means something switched back to the throwaway boot
     // context. Its stack pages are freed by idle(), so this path is a bug,

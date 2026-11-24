@@ -262,27 +262,17 @@ cell_counts Node::cells(std::span<const Node> ancestors) noexcept {
 }
 
 cell_counts Node::cells() const noexcept {
-    cell_counts counts{DEFAULT_ADDRESS_CELLS, DEFAULT_SIZE_CELLS};
-    bool have_address = false;
-    bool have_size = false;
-
-    for(Node current = parent(); current; current = current.parent()) {
-        if(!have_address) {
-            if(const auto value = current.property("#address-cells").u32()) {
-                counts.address = *value;
-                have_address = true;
-            }
-        }
-        if(!have_size) {
-            if(const auto value = current.property("#size-cells").u32()) {
-                counts.size = *value;
-                have_size = true;
-            }
-        }
-        if(have_address && have_size) {
-            break;
-        }
+    if(!valid()) {
+        return cell_counts{DEFAULT_ADDRESS_CELLS, DEFAULT_SIZE_CELLS};
     }
+    cell_counts counts{DEFAULT_ADDRESS_CELLS, DEFAULT_SIZE_CELLS};
+    m_tree->walk([&](Node current, std::span<const Node> ancestors) noexcept {
+        if(current.m_offset == m_offset) {
+            counts = cells(ancestors);
+            return WalkAction::Stop;
+        }
+        return WalkAction::Continue;
+    });
     return counts;
 }
 
@@ -411,12 +401,12 @@ bool Tree::skip_property(uint32_t offset, uint32_t& next) const noexcept {
     return next <= m_total;
 }
 
-std::string_view Tree::node_name(int node) const noexcept {
+std::string_view Tree::node_name(uint32_t node) const noexcept {
     uint32_t next = 0;
-    if(node < 0 || !skip_name(static_cast<uint32_t>(node), next)) {
+    if(node == 0 || !skip_name(node, next)) {
         return {};
     }
-    const auto* start = reinterpret_cast<const char*>(m_base + static_cast<uint32_t>(node) + 4);
+    const auto* start = reinterpret_cast<const char*>(m_base + node + 4);
     size_t length = 0;
     while(start[length] != '\0') {
         ++length;
@@ -424,30 +414,30 @@ std::string_view Tree::node_name(int node) const noexcept {
     return std::string_view{start, length};
 }
 
-int Tree::node_first_child(int node) const noexcept {
+uint32_t Tree::node_first_child(uint32_t node) const noexcept {
     uint32_t p = 0;
-    if(node < 0 || !skip_name(static_cast<uint32_t>(node), p)) {
-        return -1;
+    if(node == 0 || !skip_name(node, p)) {
+        return 0;
     }
     for(uint32_t token = 0; read_u32(p, token);) {
         switch(static_cast<Token>(token)) {
-            case Token::BEGIN_NODE: return static_cast<int>(p);
+            case Token::BEGIN_NODE: return p;
             case Token::PROP:
                 if(!skip_property(p, p)) {
-                    return -1;
+                    return 0;
                 }
                 continue;
             case Token::NOP: p += 4; continue;
-            default: return -1;
+            default: return 0;
         }
     }
-    return -1;
+    return 0;
 }
 
-int Tree::node_next_sibling(int node) const noexcept {
+uint32_t Tree::node_next_sibling(uint32_t node) const noexcept {
     uint32_t p = 0;
-    if(node < 0 || !skip_name(static_cast<uint32_t>(node), p)) {
-        return -1;
+    if(node == 0 || !skip_name(node, p)) {
+        return 0;
     }
     unsigned depth = 0;
     for(uint32_t token = 0; read_u32(p, token);) {
@@ -455,7 +445,7 @@ int Tree::node_next_sibling(int node) const noexcept {
             case Token::BEGIN_NODE:
                 ++depth;
                 if(!skip_name(p, p)) {
-                    return -1;
+                    return 0;
                 }
                 continue;
             case Token::END_NODE:
@@ -464,29 +454,27 @@ int Tree::node_next_sibling(int node) const noexcept {
                     while(read_u32(p, token) && token == value_of(Token::NOP)) {
                         p += 4;
                     }
-                    return read_u32(p, token) && token == value_of(Token::BEGIN_NODE)
-                               ? static_cast<int>(p)
-                               : -1;
+                    return read_u32(p, token) && token == value_of(Token::BEGIN_NODE) ? p : 0;
                 }
                 --depth;
                 continue;
             case Token::PROP:
                 if(!skip_property(p, p)) {
-                    return -1;
+                    return 0;
                 }
                 continue;
             case Token::NOP: p += 4; continue;
-            default: return -1;
+            default: return 0;
         }
     }
-    return -1;
+    return 0;
 }
 
-int Tree::node_parent(int node) const noexcept {
-    if(!m_valid || node < 0 || static_cast<uint32_t>(node) == m_off_struct) {
-        return -1;
+uint32_t Tree::node_parent(uint32_t node) const noexcept {
+    if(!m_valid || node == 0 || node == m_off_struct) {
+        return 0;
     }
-    int found = -1;
+    uint32_t found = 0;
     walk([&](Node current, std::span<const Node> ancestors) noexcept {
         if(current.offset() == node) {
             if(!ancestors.empty()) {
@@ -499,9 +487,9 @@ int Tree::node_parent(int node) const noexcept {
     return found;
 }
 
-Property Tree::node_property(int node, std::string_view name) const noexcept {
+Property Tree::node_property(uint32_t node, std::string_view name) const noexcept {
     uint32_t p = 0;
-    if(node < 0 || !skip_name(static_cast<uint32_t>(node), p)) {
+    if(node == 0 || !skip_name(node, p)) {
         return {};
     }
     for(uint32_t token = 0; read_u32(p, token);) {
@@ -531,12 +519,12 @@ Property Tree::node_property(int node, std::string_view name) const noexcept {
 }
 
 Node Tree::root() const noexcept {
-    return m_valid ? Node{this, static_cast<int>(m_off_struct)} : Node{};
+    return m_valid ? Node{this, m_off_struct} : Node{};
 }
 
-Node Tree::node_at(int offset) const noexcept {
+Node Tree::node_at(uint32_t offset) const noexcept {
     uint32_t next = 0;
-    if(!m_valid || offset < 0 || !skip_name(static_cast<uint32_t>(offset), next)) {
+    if(!m_valid || offset == 0 || !skip_name(offset, next)) {
         return {};
     }
     return Node{this, offset};
@@ -624,7 +612,7 @@ void Tree::walk_raw(WalkCallback callback, void* ctx, bool* truncated) const noe
                     skip_depth = 1;
                     continue;
                 }
-                const Node current{this, static_cast<int>(node_offset)};
+                const Node current{this, node_offset};
                 switch(callback(current, std::span<const Node>{ancestors, depth}, ctx)) {
                     case WalkAction::Continue: ancestors[depth++] = current; break;
                     case WalkAction::SkipChildren: skip_depth = 1; break;

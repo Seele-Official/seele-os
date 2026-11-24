@@ -1,9 +1,9 @@
 # Supervisor trap entry, installed by idle() with `csrw stvec, trap::tvec`
 # (direct mode, so the entry must be 4-byte aligned; the linker script
 # page-aligns this section). Every trap -- exception or interrupt -- arrives
-# here, and this is the only place a thread switch is allowed to begin: the
-# handlers in trap.cc run on this path and may schedule (switch_thread), so a
-# trap is where the kernel hands the hart to the next thread.
+# here, and preemptive thread switches happen on this path when trap.cc calls
+# sched::schedule() (voluntary blocking switches also occur via sched::sleep(),
+# and the initial one-way boot handoff happens in kmain()).
 #
 # sscratch says which side the trap came from:
 #
@@ -114,8 +114,8 @@ tvec:
 .align 4
 # The resume half of the user path. Exported for symbolization; the handler
 # returns into tvecret.
-.globl usertvec
-.type usertvec,@function
+.globl tvecret
+.type tvecret,@function
 tvecret:
 
     # any code the handler wrote must be visible before the resumed thread

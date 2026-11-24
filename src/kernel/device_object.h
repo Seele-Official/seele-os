@@ -15,11 +15,11 @@ namespace detail {
 // give each type one identity across translation units, with no registration
 // table or static constructors. These ids are internal to the kernel image.
 template <typename Interface>
-constexpr inline char interface_key = 0;
+inline constexpr char interface_key = 0;
 }  // namespace detail
 
 template <typename Interface>
-constexpr inline InterfaceId interface_id = &detail::interface_key<std::remove_cv_t<Interface>>;
+inline constexpr InterfaceId interface_id = &detail::interface_key<std::remove_cv_t<Interface>>;
 
 class Object {
 public:

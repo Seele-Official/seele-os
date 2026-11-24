@@ -27,9 +27,10 @@
 extern "C" {
     [[noreturn]] void panic(const char* message);
 
-    // Optional C++ panic hook.  This weak definition is a no-op; a strong
-    // definition in the kernel is used instead and can print a message before the
-    // hart stops.  It is a C symbol, but it belongs to the C++ runtime, not libc.
+    // C++ runtime panic hook. This weak definition forwards directly to
+    // panic(message) so the kernel halts with diagnostics, while still allowing
+    // a strong override if needed. It is a C symbol, but belongs to the C++
+    // runtime, not libc.
     __attribute__((weak)) void __cxx_panic(const char* message) {
         panic(message);
     }

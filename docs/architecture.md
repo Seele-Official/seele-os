@@ -1,124 +1,92 @@
 # 系统架构
 
-本文给出启动路径、模块边界和跨模块不变量。目标是帮助读者判断“一个改动会影响哪些层”，而不是逐个解释函数。操作流程见[构建与运行](build.md)，局部接口契约以源码为准。
+本文说明启动路径、模块边界、hart 模型与跨模块不变量。构建与运行流程见 [build.md](build.md)，各子系统细节分别维护在对应专题文档中。
 
-## 设计范围
+## 设计原则
 
-seele-os 当前是面向 QEMU `virt` 的 S-mode 实验内核，采用以下约束：
+seele-os 当前面向 QEMU `virt` 的 S-mode 运行环境，采用以下设计：
 
-- **自行完成 M-mode 引导。** QEMU 使用 `-bios none`，内核自己配置 PMP、trap 委托、计数器访问及 Sstc，然后通过 `mret` 进入 S-mode；不依赖 OpenSBI。
-- **自带必要运行时。** 不链接宿主 libc、libstdc++ 或 CRT，只使用工具链提供的 freestanding 头文件和仓库实现的运行时符号。
-- **启动期建立系统拓扑。** 内存区域、设备、进程和线程在启动路径中确定；启动后堆仍可增长，但没有热插拔、运行时线程创建/退出或资源销毁流程。
-- **固定容量，显式失败。** 平台表使用构建时容量；发现溢出可以告警并截断，注册失败可以返回错误，无法继续的页表/栈分配失败则 panic。不能把所有失败统一理解为停机或降级。
+- **自主完成 M-mode 引导**：QEMU 以 `-bios none` 启动，内核自行配置 PMP、trap 委托、计数器访问与 Sstc，随后经 `mret` 进入 S-mode。
+- **freestanding 运行时**：不链接宿主 libc、libstdc++ 或 CRT，仅使用工具链提供的 freestanding 头文件与仓库自带的运行时符号。
+- **启动期构建静态拓扑**：内存区域、设备、进程与初始线程均在启动期建立；运行期仅允许内核堆按需增长。
+- **固定容量与显式失败**：平台表采用构建期固定容量；发现阶段超限时告警并截断，注册接口返回失败，页表或线程栈等关键资源耗尽时 panic。
 
-目前没有用户态、系统调用和用户地址空间。进程结构与 trap 汇编中的用户路径是扩展基础，不是已经可用的用户进程支持。
-
-## 模块地图
+## 模块分层
 
 ```text
 start.S → start.cc                    M-mode：选栈、cpuid、机器状态
                 │ mret
                 ▼
-kmain.cc                             S-mode 启动编排
-  ├─ fdt                             只读设备树读取
-  ├─ platform                        早期 console、内存/hart/设备发现、MMIO
-  ├─ mm                              物理页 → 页表 → 堆与线程栈
-  ├─ drivers                         控制器与设备 probe、正式 console
-  └─ proc + shed + trap              线程入口、切换、中断与等待
+kmain.cc                              S-mode 启动编排
+  ├─ fdt                              只读设备树解析
+  ├─ platform                         早期 console、内存/hart/设备发现、MMIO
+  ├─ mm                               物理页 → 页表 → 堆与线程栈
+  ├─ drivers                          控制器与设备 probe、正式 console
+  └─ proc + sched + trap              线程入口、切换、中断与等待
 
-console + panic + stacktrace          启动和运行期的输出与诊断
+console + panic + stacktrace          启动与运行期输出与诊断
 libc + cxx/runtime                    freestanding 运行时支持
 ```
 
-### 层间接口
+### 层间契约
 
-| 边界               | 当前约定                                                                                                         |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| FDT → 平台         | `fdt` 只读取树；`platform/device` 将节点转成设备与资源。驱动通过 `Device` 属性和资源接口消费信息，不直接解析 FDT |
-| 平台 → VM          | `vm::k::init()` 接收设备 span，用其中的 MMIO 资源建立映射，不负责 probe 或设备策略                               |
-| 控制器/设备 → trap | 控制器提供 `ExternalController` 的 claim/complete，设备注册 `ExternalHandler`；trap 不依赖具体 PLIC/UART 类型    |
-| 驱动 → console     | probe 后挂接 `CharDevice`；运行期 console 调设备的读写接口，UART 中断不回调 console                              |
-| 内核 → 运行时      | `libc` 提供 C 符号，`cxx/runtime` 提供必要 ABI 支持；失败入口有意反向调用 panic                                  |
+| 边界               | 约定                                                                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------------------ |
+| FDT → 平台         | `fdt` 只做只读解析；`platform/device` 将节点转为 `Device` 与资源，驱动不直接包含 `fdt.h`               |
+| 平台 → VM          | `vm::k::init()` 接收设备 span 并映射其 MMIO 资源，不参与 probe 或设备策略                              |
+| 控制器/设备 → trap | 控制器实现 `ExternalController` 的 claim/complete，设备注册 `ExternalHandler`；trap 不依赖具体硬件类型 |
+| 驱动 → console     | probe 后挂接 `CharDevice`；console 经抽象接口读写，UART 中断处理器不回调 console                       |
+| 内核 → 运行时      | `libc` 与 `cxx/runtime` 提供 C/C++ ABI 符号，失败入口统一转入 panic                                    |
 
-对应入口：[设备模型](../src/kernel/platform/device.h)、[字符设备](../src/kernel/char_device.h)、[trap 接口](../src/kernel/trap.h)。设备资源、驱动状态和 DTB 引用的生命周期见 [平台文档](platform.md)，C/C++ 符号边界见[构建文档](build.md)。
+核心接口定义见 [device.h](../src/kernel/platform/device.h)、[char_device.h](../src/kernel/char_device.h)、[trap.h](../src/kernel/trap.h)；生命周期与符号边界分别见 [platform.md](platform.md) 与 [build.md](build.md)。
 
-## 一次启动如何完成
+## 启动顺序
 
-启动编排的权威入口是 [kmain.cc](../src/kernel/kmain.cc)。以下顺序中，分页和堆之间的先后关系不能交换。
+启动编排入口为 [kmain.cc](../src/kernel/kmain.cc)，其中分页与堆的先后顺序固定。
 
 ### boot hart
 
-| 阶段         | 主要动作                                                                        | 完成后可以依赖什么                                |
-| ------------ | ------------------------------------------------------------------------------- | ------------------------------------------------- |
-| 汇编入口     | [start.S](../src/kernel/start.S) 选择 boot 栈，将 `cpuid=0` 写入 `tp`           | 有可用栈，尚未执行全局 C++ 初始化                 |
-| M-mode 交接  | [start.cc](../src/kernel/start.cc) 配置机器状态，以 `satp=0` 进入 S-mode        | 可在无分页状态下访问 RAM/MMIO                     |
-| 早期发现     | 清 `.bss`、执行 `.init_array`，`platform::init()` 绑定 DTB 并挂接 early console | 可以解析 DTB；有 console 时可以记录后续发现日志   |
-| 平台描述     | `platform::init()` 枚举设备并解析内存/保留区、hart、timebase 与 `/chosen`       | 设备资源、内存保留区、hart 与 timebase 描述已建立 |
-| 分页准备     | `phymem::init()`、`vm::k::init()`、`create_process_pagetable()`                 | 物理页可分配，共享内核映射和首个进程根表已建立    |
-| 启用分页     | `vm::k::enable()`                                                               | 当前 hart 才能解引用高位堆对象                    |
-| 内核对象     | 创建 idle 进程和 idle 线程，映射其内核栈                                        | 有可进入的线程上下文                              |
-| 驱动与 shell | 按级别 probe；若 console 已挂接则创建 shell 线程，加入 ready 队列               | 设备 handler 注册完成，初始线程集合确定           |
-| 发布与切换   | release 发布 `started`，切入 idle                                               | secondary 可继续初始化；boot 上下文不再恢复       |
+| 阶段         | 动作                                                                            | 完成后满足的前置条件                           |
+| ------------ | ------------------------------------------------------------------------------- | ---------------------------------------------- |
+| 汇编入口     | [start.S](../src/kernel/start.S) 分配 boot 栈，将 `cpuid = 0` 写入 `tp`         | 具备可用栈，全局 C++ 对象尚未构造              |
+| M-mode 交接  | [start.cc](../src/kernel/start.cc) 配置机器状态，以 `satp = 0` 进入 S-mode      | 可在无分页状态下访问物理 RAM 与 MMIO           |
+| 早期发现     | 清 `.bss`、执行 `.init_array`，`platform::init()` 绑定 DTB 并挂接 early console | DTB 可查询；early console 就绪时可输出后续日志 |
+| 平台描述     | `platform::init()` 枚举设备并解析内存/保留区、hart、timebase 与 `/chosen`       | 平台拓扑与设备资源表只读就绪                   |
+| 分页准备     | `phymem::init()`、`vm::k::init()`、`create_process_pagetable()`                 | 物理页可分配，共享内核映射与首个进程根表已建立 |
+| 启用分页     | `vm::k::enable()`                                                               | 高位内核堆与私有线程栈窗口可访问               |
+| 内核对象     | 创建 idle 进程与 idle 线程并映射其内核栈                                        | 具备可切入的线程上下文                         |
+| 驱动与 shell | 按级别 probe 驱动；若 `console::can_read()` 为真则创建 shell 并加入 ready 队列  | 外部中断 handler 注册完毕，初始线程集固定      |
+| 发布与切换   | release 发布 `g_started`，单向切入 idle                                         | secondary 可继续初始化；boot 上下文不再恢复    |
 
-`idle()` 在自己的线程栈上归还本 hart 的启动栈，安装 `stvec`、设置定时器并开启中断，随后执行 `wfi`。shell 首次由调度路径运行，入口自行开启中断并输出提示符。
-
-早期 console 挂接失败本身不致命；没有 sink 的输出会丢弃。无效 DTB 则会触发断言。是否有 shell 取决于最终 `console::can_read()`（输出型早期 sink 不会触发 shell 启动），不能把“已进入 idle”视为交互可用。
+`idle()` 在自身线程栈上归还本 hart 的启动栈，安装 `stvec`、配置定时器并开启中断，随后循环 `wfi`。早期 console 挂接失败不影响启动（挂接前输出丢弃），无效 DTB 则直接断言失败。
 
 ### secondary hart
 
-secondary 在汇编中取得稠密 cpuid 和自己的启动栈，完成 M-mode 交接后等待 `started`。acquire 读取到发布结果后，各自创建进程根表、启用分页、创建 idle 进程和线程，再切入自己的 idle。它们不重复平台发现或驱动 probe，也不创建 shell。
+secondary 在汇编入口原子取得稠密 `cpuid` 与启动栈，完成 M-mode 交接后 acquire 等待 `g_started`。读到发布结果后，各自创建进程根表、启用分页、创建 idle 进程与线程并切入 `idle()`；不重复平台发现、驱动 probe 或创建 shell。
 
-## hart、进程与线程的关系
+## hart 与进程/线程模型
 
-- **hartid 是硬件标识，cpuid 是内核下标。** boot hart 固定 `cpuid=0`；secondary 按进入顺序原子取得 `1, 2, …`，写入 `tp`。`cpus[]`、锁所有者和启动栈槽位使用 cpuid，不能把稀疏 hartid 当数组下标。
-- **boot hart 固定为硬件 hart 0。** 这是当前入口对 QEMU 的约定，不是通用 RISC-V 保证。外部中断同样按 QEMU 的 PLIC context 1 实现，尚无 hartid → context 映射。
-- **每 hart 一个系统进程与 idle 线程。** boot hart 在同一个进程中额外创建 shell。进程承载页表和栈槽位计数，线程才是调度单位。
-- **队列是每 hart 的。** ready/sleeping 没有跨 hart 迁移或全局负载均衡；idle 不进 ready 队列，只在没有可运行线程时兜底。secondary 当前只有 idle 可运行。
-- **容量不等于活动 hart 数。** `SEELE_MAX_HARTS` 同时约束描述表、`cpus[]` 和启动栈池；超限 hart 在入口停住，未使用的栈槽位不会因为“没有对应线程”而自动回收。
+- **稠密 `cpuid` 索引**：硬件 `hartid` 仅用于固件交互；boot hart 固定为硬件 hart 0（`cpuid = 0`），secondary 依次原子分配 `1, 2, ...` 并存入 `tp`。`cpus[]`、锁所有者与启动栈池均以 `cpuid` 索引。
+- **每 hart 一系统进程**：每个 hart 拥有独立的系统进程（承载页表与栈槽位计数）和 `idle` 线程；boot hart 在同一进程内额外创建 `shell` 线程。
+- **每 hart 本地队列**：`ready` 与 `sleeping` 均为 hart 本地队列；`idle` 仅在无可运行线程时兜底，不加入 `ready`。
+- **固定容量上限**：`SEELE_MAX_HARTS` 同时限制 hart 描述表、`cpus[]` 与启动栈池；超限 hart 在入口处停机。
 
-## 地址空间为何既共享又私有
+## 跨模块不变量
 
-所有进程有独立根页表，但共享内核 image、RAM/MMIO 的恒等映射，以及高位堆的下级页表。每个进程另外拥有私有的内核栈子树；相同的栈虚拟地址可以对应不同物理页。
+| 不变量                                                       | 原因与约束                                                                              |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| 共享内核根项在 `vm::k::init()` 后冻结                        | 进程根表复制根项 0–262；运行期堆仅在已预留的共享子树内扩展（见 [memory.md](memory.md)） |
+| 线程栈位于进程私有根项 508 子树，每线程独占一槽              | 同虚拟地址在不同进程映射到独立物理页，槽位下方保留未映射 guard 页                       |
+| 高位堆仅在 `vm::k::enable()` 后访问                          | 启用分页前不能触发 `new` 或解引用堆对象                                                 |
+| DTB 与 `platform` 持有的静态 `fdt::Tree` 存活至内核结束      | 设备名、属性及 `string_view` 均借用该存储                                               |
+| boot 上下文切入 `idle()` 为单向交接                          | `idle()` 会释放本 hart 的启动栈页，旧上下文不得恢复                                     |
+| 外部中断控制器与 handler 注册早于 `g_started` 发布与中断开启 | 运行期分发表只读，无并发注销或热插拔                                                    |
+| 正常输出锁序为 `console → UART`，UART 中断仅取设备锁         | 避免锁环；panic 时先关中断再切入免等待锁的轮询路径（见 [debug.md](debug.md)）           |
+| 切换上下文时要求关中断且不持自旋锁                           | 调度与唤醒契约见 [scheduling.md](scheduling.md)                                         |
 
-| 区域       | 共享方式                            | 使用要求                                                             |
-| ---------- | ----------------------------------- | -------------------------------------------------------------------- |
-| direct map | 根项 0–255 的有效子树由进程根表共享 | `PAGE_OFFSET=0`，地址上限为 `2^38`；不是这个范围内每个地址都实际映射 |
-| 内核堆     | 根项 256–262，各大小类别一个 arena  | 先启用进程页表，再访问堆对象；增长不能改写已复制的根项               |
-| 线程栈     | 每进程独立的根项 508 子树           | 线程使用各自槽位，槽位下方保留未映射 guard 页                        |
+## 当前边界与扩展前提
 
-其余根项目前未用，不构成用户空间设计承诺。地址常量、映射权限、失败回滚边界和分配器契约集中在[内存文档](memory.md)，不在此重复维护。
-
-## 调度与中断的衔接
-
-当前内核 trap 路径在定时器和外部中断服务结束后调用 `shed::schedule()`；线程等待输入时可调用 `shed::sleep()`，也有显式 `yield()` 入口。所有切换都要求关中断且不持有自旋锁。
-
-1. trap 汇编在被中断线程的栈上保存寄存器，进入 C++ handler。
-2. handler 服务定时器或 claim/处理/complete 外部中断；UART 接收处理可能唤醒读者。
-3. 调度器从本 hart 的 ready 队列选择线程。没有其他 ready 线程时，运行中的 shell 不会仅为了“轮转 idle”被切走；shell 睡眠且没有其他 ready 线程时才回到 idle。
-4. `switch_thread()` 保存/恢复 `ra/sp/s0..s11`，跨进程时才更新 `satp`。trap 的 `sepc/sstatus` 由该次调用保存在其栈上，恢复后经 `sret` 返回。
-
-这不是带优先级、时间片管理和线程退出语义的通用调度器。锁、中断状态以及检查条件到睡眠之间如何避免丢失唤醒，见[线程与调度](scheduling.md)。
-
-## 修改时必须守住的不变量
-
-| 不变量                                                  | 破坏后的风险                                                       |
-| ------------------------------------------------------- | ------------------------------------------------------------------ |
-| 共享内核根项在 `vm::k::init()` 后冻结，进程根表复制它们 | 后续改根项不会自动同步到已有进程；运行时堆映射只能在预留子树下增长 |
-| 每进程栈子树私有，每线程独占一个槽位                    | 共享或重复映射槽位会让线程互相覆盖栈                               |
-| 高位堆晚于 `satp` 启用                                  | 提前 `new` 并访问结果会在启动期触发访问异常                        |
-| DTB 及持有节点的树对象长期有效                          | 设备名、属性及 `string_view` 借用这些存储，不能提前释放            |
-| 启动上下文只切出、不恢复                                | idle 已归还启动栈，恢复旧上下文会使用已释放内存                    |
-| handler 注册早于 `started` 发布与中断启用               | 当前运行期分发表没有热插拔或并发注销协议                           |
-| 正常输出锁顺序为 console → UART；UART 中断只拿设备锁    | 反向回调可能形成锁环；panic 路径不能再等待这些锁                   |
-| 当前没有跨 hart TLB shootdown，也没有浮点上下文保存     | 扩展共享映射修改或使用浮点前，必须补齐相关机制                     |
-
-panic 先关闭当前 hart 的中断并清空 `sie`，再用单向闩锁切换到免等待锁的轮询输出。它不等于“输出必定完整”或“硬件写入有超时”：并发内容可能交织，缓冲内容可能遗失，硬件不响应时仍可能卡在轮询。具体语义见 [平台文档](platform.md)和[调试文档](debug.md)。
-
-## 扩展前先确认影响范围
-
-- 用户态需要新的地址空间布局、`U=1` 映射、trap 帧准备、系统调用及生命周期设计，不能只启用汇编中已有的用户分支。
-- 跨 hart 调度需要线程归属、远程唤醒/IPI、队列并发与地址空间切换协议。
-- 多 hart 外部中断需要从平台信息建立 PLIC context 映射，不能把 cpuid 代入固定公式。
-- 线程退出、页表释放与堆收缩需要明确资源所有权和回收顺序，不能复用一次性启动假设。
-
-这些是尚未实现能力的前提，不是承诺的开发排期。当前功能范围以 [README](../README.md) 及对应子系统文档为准。
+- **无用户态**：进程结构与 [tvec.S](../src/kernel/tvec.S) 中的用户分支仅作预留；启用用户态需补齐 `U=1` 地址空间布局、trap 帧构造、系统调用与生命周期管理。
+- **单 hart 外部中断**：PLIC 当前固定使用 QEMU `virt` hart 0 的 S-mode context 1；支持多 hart 外部中断需建立 `hartid → PLIC context` 映射。
+- **无跨 hart 调度与 TLB shootdown**：跨 hart 迁移、远程唤醒及动态撤销共享映射均需引入 IPI 与并发同步协议。
+- **无动态生命周期回收**：尚无线程退出、页表销毁、堆页回收及设备卸载路径；浮点上下文亦未在线程切换时保存恢复。

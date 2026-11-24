@@ -6,7 +6,7 @@
 // the stack from the hartid before touching sp:
 //
 //   - hart 0 is the boot hart and gets the large stack (SEELE_BOOT_STACK_SIZE),
-//     because it runs the whole boot path: clear_bss, FDT parsing, the early
+//     because it runs the whole boot path: cxx_init, FDT parsing, the early
 //     console and driver probing;
 //   - every other hart gets a small stack (SEELE_SECONDARY_STACK_SIZE) and a
 //     dense cpuid, handed out by an atomic arrival-order counter.
@@ -22,7 +22,7 @@
 //
 // The pool covers every possible cpuid, so the number of slots is exactly
 // MAX_HARTS in hart.h -- there is no separate "how many boot stacks" knob. One
-// number sizes cpus[] and the pool, so they cannot disagree; start.cc
+// number sizes g_cpus[] and the pool, so they cannot disagree; start.cc
 // static_asserts the equality as a safety net.
 //
 // The three sizes below are build parameters passed as -D by CMakeLists.txt
@@ -48,9 +48,10 @@
 
 namespace boot {
 
-constexpr inline std::size_t STACK_COUNT = MAX_HARTS;
-constexpr inline std::size_t BOOT_STACK_SIZE = SEELE_BOOT_STACK_SIZE;
-constexpr inline std::size_t SECONDARY_STACK_SIZE = SEELE_SECONDARY_STACK_SIZE;
+constexpr std::size_t STACK_COUNT = MAX_HARTS;
+constexpr std::size_t BOOT_STACK_SIZE = SEELE_BOOT_STACK_SIZE;
+constexpr std::size_t SECONDARY_STACK_SIZE = SEELE_SECONDARY_STACK_SIZE;
+constexpr std::size_t POOL_SIZE = BOOT_STACK_SIZE + (STACK_COUNT - 1) * SECONDARY_STACK_SIZE;
 
 // Byte offset of stack `index` from the base of boot_stacks, and its size.
 // Index 0 is the boot hart's stack; 1..STACK_COUNT-1 are the secondary stacks

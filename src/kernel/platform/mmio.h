@@ -52,7 +52,8 @@ public:
     }
 
     void fence() const noexcept {
-        asm volatile("fence rw,rw" ::: "memory");
+        // Order both device I/O (i, o) and normal memory (r, w) across this point.
+        asm volatile("fence iorw,iorw" ::: "memory");
     }
 
 private:

@@ -59,10 +59,10 @@ struct freelist {
 };
 
 // The free lists, indexed by class. "Nothing mapped, nothing free" is all zeroes,
-// which is exactly what static storage starts as, so the heap needs no init call
-// and no init order: the first allocation of a class maps its first page. The
-// constinit spells out that this state must stay free of dynamic initialization --
-// a heap allocation may happen as early as the first .init_array constructor.
+// which is what static storage starts as, so the heap needs no init() call: the
+// first allocation of a class maps its first page. `constinit` keeps this state
+// free of dynamic initialization; the heap itself becomes usable once
+// phymem::init() and vm::k::enable() have run.
 constinit freelist g_lists[heap::CLASS_COUNT];
 
 // Bytes from the start of the heap window to `address`. Only meaningful once

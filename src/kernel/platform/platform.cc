@@ -44,35 +44,9 @@ public:
         m_items[m_count++] = range;
     }
 
-    // Sort by base address and merge overlapping or adjacent ranges in O(N).
+    // Sort by base address and merge overlapping or adjacent ranges in place.
     void normalize() noexcept {
-        for(size_t i = 1; i < m_count; ++i) {
-            const phys_range key = m_items[i];
-            size_t j = i;
-            while(j > 0 && to_uint64(m_items[j - 1].base) > to_uint64(key.base)) {
-                m_items[j] = m_items[j - 1];
-                --j;
-            }
-            m_items[j] = key;
-        }
-
-        size_t out = 0;
-        for(size_t i = 0; i < m_count; ++i) {
-            const phys_range candidate = m_items[i];
-            if(out > 0) {
-                phys_range& prev = m_items[out - 1];
-                const Paddr prev_end = range_end(prev.base, prev.size);
-                if(candidate.base <= prev_end) {
-                    const Paddr cand_end = range_end(candidate.base, candidate.size);
-                    if(cand_end > prev_end) {
-                        prev.size = cand_end - prev.base;
-                    }
-                    continue;
-                }
-            }
-            m_items[out++] = candidate;
-        }
-        m_count = out;
+        m_count = normalize_ranges(std::span{m_items, m_count});
     }
 
     [[nodiscard]] bool overflowed() const noexcept {

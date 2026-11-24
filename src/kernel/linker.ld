@@ -25,6 +25,12 @@ ENTRY(_entry)
  * by page. The .stack pool sits after _end, so it is a separate range the
  * allocator can account for independently of the image overlap check.
  */
+PHDRS {
+  text   PT_LOAD FLAGS(5); /* PF_R | PF_X */
+  rodata PT_LOAD FLAGS(4); /* PF_R */
+  data   PT_LOAD FLAGS(6); /* PF_R | PF_W */
+}
+
 SECTIONS {
   . = 0x80000000;
   . = ALIGN(4096);
@@ -38,7 +44,7 @@ SECTIONS {
     . = ALIGN(4096);
     _trampoline = .;
     /* The page is entered through stvec, never called from C, so nothing
-       references trampoline/usertvec: --gc-sections would discard the whole
+       references trampoline/tvecret: --gc-sections would discard the whole
        input section and the ASSERT below would then see zero bytes, not a
        trampoline that is too big. Keep it explicitly. */
     KEEP(*(.text.tvec))
@@ -47,14 +53,14 @@ SECTIONS {
            "error: trampoline must occupy exactly one page");
     *(.text .text.*)
     __text_end = .;
-  }
+  } :text
 
   . = ALIGN(4096);
   .rodata : {
     __rodata_start = .;
     *(.rodata .rodata.*) *(.srodata .srodata.*)
     __rodata_end = .;
-  }
+  } :rodata
 
   . = ALIGN(4096);
   .data : {
@@ -67,20 +73,20 @@ SECTIONS {
     __global_pointer$ = . + 0x800;
     *(.sdata .sdata.*)
     __data_end = .;
-  }
+  } :data
 
   .init_array : {
     __init_array_start = .;
     KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
     KEEP(*(.init_array))
     __init_array_end = .;
-  }
+  } :data
 
   .bss : {
     __bss_start = .;
     *(.sbss .sbss.*) *(.bss .bss.*) *(COMMON)
     __bss_end = .;
-  }
+  } :data
 
   /* First byte past the kernel image (code + data + bss), rounded up to a whole
      page. */
@@ -97,7 +103,7 @@ SECTIONS {
     __boot_stack_start = .;
     *(.stack .stack.*)
     __boot_stack_end = .;
-  }
+  } :data
 
   /* start.S computes per-hart stack addresses by adding hard-coded offsets to
      boot_stacks, so the object has to be the first thing in .stack, and the

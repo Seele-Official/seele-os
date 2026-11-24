@@ -5,7 +5,7 @@
 // require a current thread, local interrupts disabled and no spinlock held:
 // lock ownership and interrupt nesting belong to the hart, not to the thread.
 // wake() only makes a sleeping thread ready; it does not switch contexts.
-namespace shed {
+namespace sched {
 
 // Park the current non-idle thread until wake() makes it ready on this hart.
 // Run another ready thread, or fall back to idle if none exists.
@@ -35,4 +35,4 @@ void yield() noexcept;
 // than a corruption.
 void wake(proc::thread* thread) noexcept;
 
-}  // namespace shed
+}  // namespace sched

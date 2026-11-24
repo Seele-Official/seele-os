@@ -1,7 +1,6 @@
 #include "hart.h"
 
 #include "riscv.h"
-#include "boot/stack.h"
 
 using namespace riscv::registers;
 
@@ -16,12 +15,12 @@ using namespace riscv::registers;
 // The mapping from hardware hartid to cpuid is not recorded. Nothing currently
 // needs it: kmain receives the hartid as an argument. Code that needs to go
 // from one to the other has to build a hartid -> cpuid table from the tree.
-static cpu cpus[MAX_HARTS];
+static cpu g_cpus[MAX_HARTS];
 
 uint64_t cpuid() noexcept {
     return riscv::read(tp);
 }
 
 cpu* mycpu() noexcept {
-    return &cpus[cpuid()];
+    return &g_cpus[cpuid()];
 }

@@ -42,10 +42,10 @@ public:
     // empty. The guard releases the lock on both paths, so an empty pool cannot
     // leave the allocator locked forever.
     [[nodiscard]] Paddr alloc() noexcept {
-        LockGuard guard{this->lock};
-        free_node* page = this->free_list;
+        LockGuard guard{m_lock};
+        free_node* page = m_free_list;
         if(page != nullptr) {
-            this->free_list = page->next;
+            m_free_list = page->next;
         }
         return page == nullptr ? null_paddr() : page_of(page);
     }
@@ -53,18 +53,18 @@ public:
     // Push one page onto the free list. `page` must already be validated by
     // free() or produced by init().
     void push(Paddr page) noexcept {
-        LockGuard guard{this->lock};
+        LockGuard guard{m_lock};
         free_node* node = node_at(page);
-        node->next = this->free_list;
-        this->free_list = node;
+        node->next = m_free_list;
+        m_free_list = node;
     }
 
 private:
-    free_node* free_list = nullptr;
-    Spinlock lock{};
+    free_node* m_free_list = nullptr;
+    Spinlock m_lock{};
 };
 
-Allocator allocator;
+Allocator g_allocator;
 
 // True when the page [page, page + PGSIZE) intersects [base, base + size) for
 // any Reserved region. The end is saturated rather than computed, so a range
@@ -111,7 +111,7 @@ Paddr g_kernel_end = null_paddr();
 }  // namespace
 
 Paddr alloc() noexcept {
-    return allocator.alloc();
+    return g_allocator.alloc();
 }
 
 void free(Paddr page) noexcept {
@@ -136,7 +136,7 @@ void free(Paddr page) noexcept {
                  "free: {:#x} is inside a reserved region",
                  address);
 
-    allocator.push(page);
+    g_allocator.push(page);
 }
 
 void init(const platform::MemoryMap& memory) noexcept {
@@ -151,12 +151,14 @@ void init(const platform::MemoryMap& memory) noexcept {
     const Paddr stack_start = vm::k::V2P(vaddr(vm::BOOT_STACK.start));
     const Paddr stack_end = vm::k::V2P(vaddr(vm::BOOT_STACK.end));
 
-    // Keep the reserved ranges so free() rejects them later.
+    // Keep the reserved ranges so free() rejects them later. Silently dropping
+    // a reserved range could hand out DTB/firmware memory as free RAM.
     g_reserved_count = 0;
     for(const phys_range& range: memory.reserved()) {
-        if(g_reserved_count < platform::MAX_REGIONS) {
-            g_reserved[g_reserved_count++] = range;
-        }
+        SEELE_ASSERT(g_reserved_count < platform::MAX_REGIONS,
+                     "phymem: reserved region count exceeds MAX_REGIONS ({})",
+                     platform::MAX_REGIONS);
+        g_reserved[g_reserved_count++] = range;
     }
     const std::span<const phys_range> reserved{g_reserved, g_reserved_count};
 
@@ -224,7 +226,7 @@ void init(const platform::MemoryMap& memory) noexcept {
                 // Firmware that puts RAM at 0 loses exactly that one page.
                 continue;
             }
-            allocator.push(page);
+            g_allocator.push(page);
             ++page_count;
         }
     }

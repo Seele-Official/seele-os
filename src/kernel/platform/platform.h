@@ -28,7 +28,7 @@ namespace platform {
 #ifndef SEELE_MAX_REGIONS
 #error "SEELE_MAX_REGIONS is not defined: build the kernel through CMake (see CMakeLists.txt)"
 #endif
-constexpr inline size_t MAX_REGIONS = SEELE_MAX_REGIONS;
+constexpr size_t MAX_REGIONS = SEELE_MAX_REGIONS;
 
 // Static hardware description of one enabled CPU from firmware `/cpus`.
 // Runtime boot-hart identity is a single scalar (`Info::boot_hartid()`), not a

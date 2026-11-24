@@ -10,19 +10,6 @@
 
 namespace {
 
-// "src/kernel/kmain.cc" becomes "kmain.cc", the same rule console.cc uses for
-// its LOG_* prefix: the file name identifies the call site and the directory
-// the build happened to use is noise in a panic message. The view is sliced by
-// hand because string_view::substr() carries a range-check path the kernel does
-// not need.
-[[nodiscard]] std::string_view file_basename(std::string_view file) noexcept {
-    const size_t slash = file.find_last_of('/');
-    if(slash == std::string_view::npos) {
-        return file;
-    }
-    return std::string_view{file.data() + slash + 1, file.size() - slash - 1};
-}
-
 // No interrupt is going to make a panicked hart useful again, so stop taking
 // them and wait in the lowest-power state available instead of spinning.
 // Clearing the per-source enables matters for more than tidiness: wfi is
@@ -51,7 +38,7 @@ void begin_panic() noexcept {
 
 void print_position(const char* file, int line, const char* function) noexcept {
     const std::string_view name =
-        file != nullptr ? file_basename(file) : std::string_view{"(unknown)"};
+        file != nullptr ? console::file_basename(file) : std::string_view{"(unknown)"};
     println("  at {}:{} in {}", name, line, function != nullptr ? function : "(unknown)");
 }
 

@@ -3,7 +3,7 @@
     "version": "0.1.0",
     "private": true,
     "type": "module",
-    "description": "TypeScript development scripts and QEMU smoke tests for seele-os",
+    "description": "TypeScript development scripts for seele-os",
     "packageManager": "pnpm@12.18.0",
     "engines": {
         "node": ">=26"

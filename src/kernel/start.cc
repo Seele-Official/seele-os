@@ -27,17 +27,12 @@ namespace {
 using namespace riscv;
 using namespace riscv::registers;
 
-// One secondary boot stack: a page-aligned run of SECONDARY_STACK_SIZE bytes.
-// Naming it keeps the boot_stack_pool member declaration readable (and inside the
-// column limit) instead of spelling a two-dimensional array.
-using SecondaryStack = std::byte[boot::SECONDARY_STACK_SIZE];
-
 // Leave M-mode for S-mode.
 //
 // mret restores pc from mepc and the privilege mode from mstatus.MPP, and does
 // not touch any GPR. That is what lets hartid and dtb cross the boundary in
-// a0/a1, exactly where the lp64 ABI expects the first two arguments of
-// s_mode_entry(). Two details make the handoff safe:
+// a0/a1, exactly where the lp64d ABI expects the first two arguments of
+// kmain(). Two details make the handoff safe:
 //
 //  - a0/a1 are listed as clobbers. Without that, GCC could put hartid in a1 and
 //    dtb in a0; the first move would then overwrite dtb before the second move
@@ -65,20 +60,12 @@ using SecondaryStack = std::byte[boot::SECONDARY_STACK_SIZE];
 }  // namespace
 
 extern "C" {
-    // The boot stack pool, laid out exactly as boot::stack_offset() and
-    // boot::stack_size() describe it: one large stack for hart 0 followed by
-    // one small stack per possible secondary cpuid (1..STACK_COUNT-1).
-    //
-    // A single object, rather than separate arrays, is what guarantees the
-    // layout: with -fdata-sections every global gets its own input section,
-    // and the linker is free to order those sections. Keeping the stacks as
-    // members of one object makes their offsets a property of the type, which
-    // is what _entry hard-codes in its address arithmetic.
+    // The boot stack pool, laid out as boot::stack_offset() and
+    // boot::stack_size() describe: one stack for hart 0 followed by one slice
+    // per possible secondary cpuid (1..STACK_COUNT-1). Keeping it as a single
+    // flat array also works cleanly when STACK_COUNT == 1 (no zero-sized array).
     struct boot_stack_pool {
-        alignas(riscv::PGSIZE) std::byte boot[boot::BOOT_STACK_SIZE];
-        // One slice per possible secondary cpuid; STACK_COUNT is MAX_HARTS, and
-        // cpuid 0 belongs to the boot hart above.
-        alignas(riscv::PGSIZE) SecondaryStack secondary[boot::STACK_COUNT - 1];
+        alignas(riscv::PGSIZE) std::byte storage[boot::POOL_SIZE];
     };
 
     // Its own input section so linker.ld can put it in the page-aligned .stack
@@ -95,16 +82,12 @@ extern "C" {
 }
 
 static_assert(boot::stack_offset(0) == 0);
-static_assert(offsetof(boot_stack_pool, boot) == boot::stack_offset(0));
-static_assert(offsetof(boot_stack_pool, secondary) == boot::stack_offset(1));
+static_assert(sizeof(boot_stack_pool) == boot::POOL_SIZE);
 static_assert(sizeof(boot_stack_pool) ==
               boot::stack_offset(boot::STACK_COUNT - 1) + boot::stack_size(boot::STACK_COUNT - 1));
 static_assert(boot::STACK_COUNT == MAX_HARTS,
-              "the boot stack pool must cover every cpuid cpus[] is indexed by");
-static_assert(boot::STACK_COUNT >= 2,
-              "the pool needs one boot stack plus at least one secondary slot");
-static_assert(SEELE_BOOT_STACK_SIZE > SEELE_SECONDARY_STACK_SIZE,
-              "the boot hart's stack must be larger than a secondary's");
+              "the boot stack pool must cover every cpuid g_cpus[] is indexed by");
+static_assert(boot::STACK_COUNT >= 1, "the pool needs at least the boot hart's stack");
 static_assert(SEELE_BOOT_STACK_SIZE % riscv::PGSIZE == 0 &&
                   SEELE_SECONDARY_STACK_SIZE % riscv::PGSIZE == 0,
               "each boot stack must be a whole number of pages");
@@ -135,7 +118,7 @@ extern "C" [[noreturn]] void start(uint64_t hartid, Paddr dtb) noexcept {
     csrw(mideleg, 0xffffull);
 
     // enable hardware updating of PTE A/D bits in S-mode
-    csrs(menvcfg, csr::menvcfg::AUDE);
+    csrs(menvcfg, csr::menvcfg::ADUE);
 
     // enable Sstc extension
     csrs(menvcfg, csr::menvcfg::STCE);

@@ -13,15 +13,14 @@ export function qemuBinary(): string {
 }
 
 export function qemuArgs({ harts, paths }: QemuCommand): string[] {
-    const args = [
-        `-machine virt -bios none -kernel ${paths.kernelElf} -m 128M -smp ${harts}`,
-        `-nographic -display none -serial stdio -monitor none`,
-        `-global virtio-mmio.force-legacy=false`,
-        `-drive file=${paths.diskImage},if=none,format=raw,id=x0`,
-        `-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0`,
-    ];
-
-    return args.flatMap((arg) => arg.split(' '));
+    return [
+        ['-machine', 'virt', '-bios', 'none', '-m', '128M', '-smp', `${harts}`],
+        ['-kernel', paths.kernelElf],
+        ['-nographic', '-display', 'none', '-serial', 'stdio', '-monitor', 'none'],
+        ['-global', 'virtio-mmio.force-legacy=false'],
+        ['-drive', `file=${paths.diskImage},if=none,format=raw,id=x0`],
+        ['-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0'],
+    ].flat();
 }
 
 export function assertArtifacts(paths: BuildPaths): void {

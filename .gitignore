@@ -1,7 +1,7 @@
 # pixi environment
 .pixi/
 
-# Toolchain checkout: a separate repo that builds the local file channel.
+# Toolchain checkout: separate seele-toolchain repository.
 /toolchain/
 
 # Node.js tooling

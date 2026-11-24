@@ -1,5 +1,5 @@
 # clang-format configuration
-# compatible with clang-format 18
+# clang-format 21
 
 UseTab: Never
 ColumnLimit: 100
@@ -95,7 +95,7 @@ SpacesInSquareBrackets: false
 
 # Order
 QualifierAlignment: Custom
-QualifierOrder: ["constexpr", "const", "inline", "static", "type"]
+QualifierOrder: ["static", "inline", "constexpr", "const", "type"]
 SortIncludes: true
 SortUsingDeclarations: Never
 IncludeBlocks: Regroup

@@ -6,7 +6,7 @@
 #include "hart.h"
 #include "panic.h"
 #include "riscv.h"
-#include "shed/schedule.h"
+#include "sched/schedule.h"
 
 using namespace riscv;
 using namespace riscv::registers;
@@ -75,11 +75,11 @@ void warn_unhandled_source(uint32_t irq) noexcept {
 
 // The C++ half of the trap path (the entry is tvec.S). Scheduling happens here:
 // after a trap has been handled and before the return, the handler may switch
-// to the next thread (shed::switch_thread, shed/switch.h), so this is where the
+// to the next thread (sched::switch_thread, sched/switch.h), so this is where the
 // kernel preempts a thread or resumes one an interrupt woke. (A thread can also
-// give the hart away on purpose, in shed::sleep().) Both interrupt causes the
+// give the hart away on purpose, in sched::sleep().) Both interrupt causes the
 // kernel handles are scheduling points: the timer preempts the running thread
-// (shed::schedule), and an external interrupt may have woken one -- the console's
+// (sched::schedule), and an external interrupt may have woken one -- the console's
 // receive interrupt wakes a reader parked in console::read() -- so it schedules
 // too. Exceptions never schedule.
 
@@ -88,7 +88,7 @@ void warn_unhandled_source(uint32_t irq) noexcept {
 // to the kernel stack. The handler receives that frame in a0 and returns the
 // frame to resume: tvec.S stores it back into sscratch and restores the
 // registers and the CSRs from it. Once this path calls the scheduler
-// (switch_thread, shed/switch.h), that returned frame may belong to another
+// (switch_thread, sched/switch.h), that returned frame may belong to another
 // thread, which is how a trap becomes a thread switch.
 extern "C" trap_frame* usertrap(trap_frame* frame) {
     uint64_t cause = csrr(scause);
@@ -130,21 +130,6 @@ extern "C" void kerneltrap() {
 
     SEELE_ASSERT(status & csr::sstatus::SPP, "Not from supervisor mode");
 
-    // Timer ticks are the scheduler's common case and would flood the console
-    // at every rotation; external interrupts are the UART's receive and
-    // transmit-empty conditions now, which are routine too. Log the causes that
-    // are actually unusual: exceptions and the unhandled interrupt numbers.
-    // Logging an external interrupt here would also feed the UART's own
-    // transmit interrupt, one log line per serviced byte.
-    if(cause != csr::scause::TIME_INT && cause != csr::scause::EXT_INT) {
-        LOG_DEBUG("hart {} kerneltrap time = {:#x} pc = {:#x} status = {:#x} cause = {:#x}",
-                  cpuid(),
-                  csrr(time),
-                  pc,
-                  status,
-                  cause);
-    }
-
     switch(cause) {
         case csr::scause::TIME_INT: {
             // Re-arm the timer before scheduling: whichever thread resumes
@@ -152,7 +137,7 @@ extern "C" void kerneltrap() {
             // the moment it returns.
             csrw(stimecmp, csrr(time) + 1000000);
 
-            shed::schedule();
+            sched::schedule();
             break;
         }
         case csr::scause::EXT_INT: {
@@ -164,14 +149,22 @@ extern "C" void kerneltrap() {
             // which is the difference between an echo within microseconds and one
             // within a timer period. schedule() returns immediately when nothing
             // is ready.
-            shed::schedule();
+            sched::schedule();
             break;
         }
         default: {
-            // Exceptions and any other interrupt cause: they have no handler
-            // yet, so they are only logged. The assert above already caught
-            // the "trap from user mode in the kernel path" case.
-            break;
+            // Returning to the same sepc without advancing it or clearing the
+            // interrupt source would trap again immediately in an infinite loop.
+            const uint64_t tval = csrr(stval);
+            const char* kind = (cause & csr::scause::INTERRUPT) != 0 ? "interrupt" : "exception";
+            SEELE_PANIC(
+                "hart {} unhandled kernel {}: cause={:#x} sepc={:#018x} stval={:#018x} sstatus={:#x}",
+                cpuid(),
+                kind,
+                cause,
+                pc,
+                tval,
+                status);
         }
     }
 

@@ -1,5 +1,5 @@
 # Switch kernel threads: save the current callee-saved state into `from` and
-# resume `to` (declared in shed/switch.h, shed::switch_thread()).
+# resume `to` (declared in sched/switch.h, sched::switch_thread()).
 #
 # a0 = proc::thread* from   (receives ra, sp, s0-s11)
 # a1 = proc::thread* to     (the thread to resume)
@@ -29,7 +29,7 @@
 # the write entirely -- and keeps the TLB warm.
 #
 # switch_thread is called from the trap path after a trap has been handled, and
-# from shed::sleep() when a thread parks itself (console::read() does). Both
+# from sched::sleep() when a thread parks itself (console::read() does). Both
 # callers have interrupts disabled and hold no lock. Every access here is
 # a0/a1-relative, so nothing reads through the old sp once it changes.
 #

@@ -101,13 +101,13 @@ template <typename... Args>
 // Stop with a formatted message, the source position and the stack trace.
 #define SEELE_PANIC(...) ::debug::panicf(std::source_location::current(), __VA_ARGS__)
 
-// Mark a point the code must never reach. Unlike std::unreachable(), this
-// panics with a location instead of trapping: the kernel has no trap handler
-// yet, so an ebreak here would stop the hart without any diagnostics.
+// Mark a point the code must never reach. Unlike std::unreachable() (which is
+// undefined behavior or lowers to a bare trap instruction), this panics
+// directly with the call site's source location and stack trace.
 #define SEELE_UNREACHABLE()                                                                        \
     ::debug::panicf(std::source_location::current(), "unreachable code reached")
 
 // Tell the compiler that `condition` always holds, without checking it. It is
 // a proof, not a test: a false condition makes the program's behaviour
 // undefined. Reach for SEELE_ASSERT unless the branch shows up in a profile.
-#define SEELE_ASSUME(condition) [[gnu::assume(condition)]]
+#define SEELE_ASSUME(condition) [[assume(condition)]]

@@ -5,9 +5,9 @@
 
 // A kernel spinlock.
 //
-// The kernel runs on a single hart today, but the lock follows the shared-memory
-// model: lock() spins until it owns the lock, and ownership is published with
-// acquire/release ordering so that the critical section cannot move across it.
+// Follows the shared-memory model: lock() spins until it owns the lock, and
+// ownership is published with acquire/release ordering so that the critical
+// section cannot move across it.
 //
 // lock() also disables S-mode interrupts on the current hart. Without that, an
 // interrupt handler that takes the same lock would spin forever on a hart whose
@@ -55,15 +55,12 @@ public:
     [[nodiscard]] bool try_lock() noexcept;
 
 private:
-    // Sentinel for "no hart owns the lock". hart ids are small, so the largest
-    // uint64_t cannot collide with a real one.
-    constexpr static uint64_t NO_OWNER = ~uint64_t{0};
+    // Sentinel for "no hart owns the lock". cpuid values are bounded by
+    // MAX_HARTS, so the largest uint64_t cannot collide with a real one.
+    static constexpr uint64_t NO_OWNER = ~uint64_t{0};
 
-    std::atomic<bool> m_locked{false};
-
-    // The hart that owns the lock, for the misuse checks above only. Relaxed
-    // ordering is enough: the value is never read to make a concurrency
-    // decision, only to tell "mine" from "someone else's" while debugging a
-    // hang that has already happened.
+    // Single atomic holding both lock state and owner cpuid: NO_OWNER when
+    // unlocked, otherwise the owning hart's cpuid. Combining them eliminates
+    // the split-state window between acquiring the lock and recording its owner.
     std::atomic<uint64_t> m_owner{NO_OWNER};
 };

@@ -27,7 +27,7 @@ namespace fdt {
 #ifndef SEELE_FDT_MAX_DEPTH
 #error "SEELE_FDT_MAX_DEPTH is not defined: build the kernel through CMake (see CMakeLists.txt)"
 #endif
-constexpr inline uint32_t MAX_DEPTH = SEELE_FDT_MAX_DEPTH;
+constexpr uint32_t MAX_DEPTH = SEELE_FDT_MAX_DEPTH;
 
 // Read a big-endian cell without requiring alignment. Avoids std::byteswap,
 // which lowers to libgcc's __bswapsi2/__bswapdi2 on rv64gc without Zbb.
@@ -285,23 +285,24 @@ private:
 class ChildRange;
 
 // Lightweight handle to one node: owning tree pointer plus structure-block byte
-// offset. Every accessor is safe on an invalid default-constructed Node.
+// offset. Offset 0 is the invalid sentinel (valid nodes always start at or
+// after the 40-byte DTB header). Every accessor is safe on an invalid Node.
 class Node {
 public:
     constexpr Node() noexcept = default;
 
     [[nodiscard]] constexpr bool valid() const noexcept {
-        return m_tree != nullptr && m_offset >= 0;
+        return m_tree != nullptr && m_offset != 0;
     }
 
     [[nodiscard]] constexpr explicit operator bool() const noexcept {
         return valid();
     }
 
-    // Structure-block byte offset, or -1 when invalid. Stable for the tree's
+    // Structure-block byte offset, or 0 when invalid. Stable for the tree's
     // lifetime and reconstructible via Tree::node_at().
-    [[nodiscard]] constexpr int offset() const noexcept {
-        return valid() ? m_offset : -1;
+    [[nodiscard]] constexpr uint32_t offset() const noexcept {
+        return valid() ? m_offset : 0;
     }
 
     [[nodiscard]] friend constexpr bool operator== (const Node& lhs, const Node& rhs) noexcept {
@@ -343,10 +344,10 @@ public:
 private:
     friend class Tree;
 
-    constexpr Node(const Tree* tree, int offset) noexcept : m_tree(tree), m_offset(offset) {}
+    constexpr Node(const Tree* tree, uint32_t offset) noexcept : m_tree(tree), m_offset(offset) {}
 
     const Tree* m_tree = nullptr;
-    int m_offset = -1;
+    uint32_t m_offset = 0;
 };
 
 // Range-for view over a node's direct children.
@@ -412,7 +413,7 @@ public:
     }
 
     [[nodiscard]] Node root() const noexcept;
-    [[nodiscard]] Node node_at(int offset) const noexcept;
+    [[nodiscard]] Node node_at(uint32_t offset) const noexcept;
     [[nodiscard]] Node find(std::string_view path) const noexcept;
     [[nodiscard]] Node by_phandle(uint32_t phandle) const noexcept;
     [[nodiscard]] ReservedRange reserved_regions() const noexcept;
@@ -452,11 +453,11 @@ private:
     [[nodiscard]] bool skip_property(uint32_t offset, uint32_t& next) const noexcept;
     [[nodiscard]] std::string_view string_at(uint32_t offset) const noexcept;
 
-    [[nodiscard]] std::string_view node_name(int node) const noexcept;
-    [[nodiscard]] int node_first_child(int node) const noexcept;
-    [[nodiscard]] int node_next_sibling(int node) const noexcept;
-    [[nodiscard]] int node_parent(int node) const noexcept;
-    [[nodiscard]] Property node_property(int node, std::string_view name) const noexcept;
+    [[nodiscard]] std::string_view node_name(uint32_t node) const noexcept;
+    [[nodiscard]] uint32_t node_first_child(uint32_t node) const noexcept;
+    [[nodiscard]] uint32_t node_next_sibling(uint32_t node) const noexcept;
+    [[nodiscard]] uint32_t node_parent(uint32_t node) const noexcept;
+    [[nodiscard]] Property node_property(uint32_t node, std::string_view name) const noexcept;
 
     const std::byte* m_base = nullptr;
     uint32_t m_total = 0;

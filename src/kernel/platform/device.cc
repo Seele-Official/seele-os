@@ -23,12 +23,7 @@ size_t g_device_count = 0;
 size_t g_mmio_count = 0;
 size_t g_irq_count = 0;
 
-struct phandle_entry {
-    uint32_t phandle;
-    uint32_t device;
-};
-
-struct irq_binding {
+struct device_phandle {
     uint32_t phandle;
     uint32_t device;
 };
@@ -38,13 +33,13 @@ struct controller_ref {
     uint32_t phandle = 0;
 };
 
-[[nodiscard]] fdt::Node node_of(int offset) noexcept {
+[[nodiscard]] fdt::Node node_of(uint32_t offset) noexcept {
     return g_tree != nullptr ? g_tree->node_at(offset) : fdt::Node{};
 }
 
-[[nodiscard]] uint32_t device_for_phandle(std::span<const phandle_entry> table,
+[[nodiscard]] uint32_t device_for_phandle(std::span<const device_phandle> table,
                                           uint32_t phandle) noexcept {
-    for(const phandle_entry& entry: table) {
+    for(const device_phandle& entry: table) {
         if(entry.phandle == phandle) {
             return entry.device;
         }
@@ -95,7 +90,7 @@ struct controller_ref {
 [[nodiscard]] bool append_resources(const fdt::Tree& tree,
                                     fdt::Node node,
                                     std::span<const fdt::Node> ancestors,
-                                    irq_binding* irq_bindings,
+                                    device_phandle* irq_bindings,
                                     uint32_t device_id) noexcept {
     for(const phys_range range: node.regs(ancestors)) {
         if(g_mmio_count == MAX_RESOURCES) {
@@ -127,7 +122,7 @@ struct controller_ref {
         if(g_irq_count == MAX_RESOURCES) {
             return false;
         }
-        irq_bindings[g_irq_count] = irq_binding{controller->phandle, device_id};
+        irq_bindings[g_irq_count] = device_phandle{controller->phandle, device_id};
         g_irqs[g_irq_count++] = irq_line{
             .controller = UINT32_MAX,
             .number = fdt::be32(bytes.data() + offset),
@@ -149,9 +144,9 @@ void enumerate(const fdt::Tree& tree) noexcept {
         return;
     }
 
-    phandle_entry phandles[MAX_DEVICES]{};
+    device_phandle phandles[MAX_DEVICES]{};
     size_t phandle_count = 0;
-    irq_binding irq_bindings[MAX_RESOURCES]{};
+    device_phandle irq_bindings[MAX_RESOURCES]{};
     bool truncated = false;
 
     tree.walk(
@@ -195,7 +190,7 @@ void enumerate(const fdt::Tree& tree) noexcept {
             dev.m_irq_count = static_cast<uint16_t>(irq_count);
 
             if(const auto phandle = node.phandle()) {
-                phandles[phandle_count++] = phandle_entry{*phandle, candidate_id};
+                phandles[phandle_count++] = device_phandle{*phandle, candidate_id};
             }
             return fdt::WalkAction::Continue;
         },
@@ -207,7 +202,7 @@ void enumerate(const fdt::Tree& tree) noexcept {
 
     // Resolve each IRQ line's interrupt-parent phandle to its controller device
     // id now that every device exists.
-    const std::span<const phandle_entry> phandle_table{phandles, phandle_count};
+    const std::span<const device_phandle> phandle_table{phandles, phandle_count};
     uint32_t last_warned_device = UINT32_MAX;
     for(size_t i = 0; i < g_irq_count; ++i) {
         const uint32_t controller = device_for_phandle(phandle_table, irq_bindings[i].phandle);

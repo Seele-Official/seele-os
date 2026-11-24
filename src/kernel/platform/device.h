@@ -38,8 +38,8 @@ struct irq_line {
 #ifndef SEELE_MAX_RESOURCES
 #error "SEELE_MAX_RESOURCES is not defined: build the kernel through CMake (see CMakeLists.txt)"
 #endif
-constexpr inline size_t MAX_DEVICES = SEELE_MAX_DEVICES;
-constexpr inline size_t MAX_RESOURCES = SEELE_MAX_RESOURCES;
+constexpr size_t MAX_DEVICES = SEELE_MAX_DEVICES;
+constexpr size_t MAX_RESOURCES = SEELE_MAX_RESOURCES;
 
 // Probe state, owned by the driver core. Every matched device is probed at most
 // once.
@@ -98,7 +98,7 @@ public:
 private:
     friend void enumerate(const fdt::Tree& tree) noexcept;
 
-    int m_fdt_offset = -1;
+    uint32_t m_fdt_offset = 0;
     uint16_t m_mmio_begin = 0;
     uint16_t m_mmio_count = 0;
     uint16_t m_irq_begin = 0;

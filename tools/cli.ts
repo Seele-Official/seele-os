@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
+import { constants as osConstants } from 'node:os';
 import { dirname } from 'node:path';
 
 import cac from 'cac';
@@ -79,7 +80,8 @@ async function runQemu(options: QemuOptions): Promise<void> {
         child.once('error', reject);
         child.once('exit', (code, signal) => {
             if (signal) {
-                resolve(signal === 'SIGINT' ? 130 : 143);
+                const signum = osConstants.signals[signal];
+                resolve(signum ? 128 + signum : 1);
             } else {
                 resolve(code ?? 1);
             }

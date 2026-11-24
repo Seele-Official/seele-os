@@ -1,5 +1,9 @@
 #pragma once
 
+#include <atomic>
+
+#include "panic.h"
+
 // RAII owners for locks.
 //
 // LockGuard acquires in its constructor and releases in its destructor, so
@@ -62,4 +66,52 @@ public:
 private:
     Lock& m_lock;
     bool m_locked;
+};
+
+// Acquires `lock` unless `panicking` is latched.
+//
+// Spins via try_lock(), asserting against self-deadlock on the current hart. If
+// `panicking` is observed before acquisition or re-checked as true immediately
+// after acquiring the lock, releases the lock (if taken) and leaves locked()
+// false so the caller takes its lock-free panic fallback.
+template <typename Lock>
+class PanicLockGuard {
+public:
+    PanicLockGuard(Lock& lock,
+                   const std::atomic<bool>& panicking,
+                   const char* recursive_message) noexcept : m_lock(lock) {
+        while(true) {
+            if(panicking.load(std::memory_order_acquire)) {
+                return;
+            }
+            if(m_lock.try_lock()) {
+                if(panicking.load(std::memory_order_acquire)) {
+                    m_lock.unlock();
+                    return;
+                }
+                m_locked = true;
+                return;
+            }
+            SEELE_ASSERT(!m_lock.owned_by_current_hart(), "{}", recursive_message);
+        }
+    }
+
+    ~PanicLockGuard() noexcept {
+        if(m_locked) {
+            m_lock.unlock();
+        }
+    }
+
+    PanicLockGuard(const PanicLockGuard&) = delete;
+    PanicLockGuard& operator= (const PanicLockGuard&) = delete;
+    PanicLockGuard(PanicLockGuard&&) = delete;
+    PanicLockGuard& operator= (PanicLockGuard&&) = delete;
+
+    [[nodiscard]] bool locked() const noexcept {
+        return m_locked;
+    }
+
+private:
+    Lock& m_lock;
+    bool m_locked = false;
 };

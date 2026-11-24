@@ -47,17 +47,23 @@ constexpr uint64_t PTE_PPN_MASK = (0b1ull << 44) - 1;
 // PTE.
 constexpr uint64_t PTE_LEAF_MASK = PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
 
-// A CSR named at the type level. The assembler mnemonic lives in the template
-// argument, which is what lets the helpers below splice it into an asm
-// template at compile time instead of carrying a runtime string.
+// A CSR or GPR named at the type level. Keeping them as distinct tag types
+// prevents passing a GPR to a CSR instruction or a CSR to read()/write() at
+// compile time instead of failing in the assembler.
 template <auto Reg>
 struct csr_register {
-    constexpr static auto value = Reg;
+    static constexpr auto value = Reg;
+};
+
+template <auto Reg>
+struct gpr_register {
+    static constexpr auto value = Reg;
 };
 
 namespace registers {
 
 #define Reg(name) constexpr csr_register<StaticString{#name}> name
+#define Gpr(name) constexpr gpr_register<StaticString{#name}> name
 
 // M-mode CSRs, programmed by start() before it mrets into S-mode.
 Reg(mstatus);
@@ -94,10 +100,10 @@ Reg(stimecmp);
 
 Reg(time);
 
-// tp is not a CSR: it is the thread pointer, one of the integer registers, so
-// only read()/write() below (which use mv) accept it.
-Reg(tp);
+// tp is a GPR (thread pointer), not a CSR: only read()/write() accept it.
+Gpr(tp);
 
+#undef Gpr
 #undef Reg
 
 }  // namespace registers
@@ -190,9 +196,9 @@ constexpr uint64_t ALL = CY | TM | IR | HPM_MASK;
 }  // namespace mcounteren
 
 namespace menvcfg {
-// AUDE[61]: controls whether hardware updating of PTE A/D bits is enabled for
-// S-mode and G-stage address translations.
-constexpr uint64_t AUDE = 0b1ull << 61;
+// ADUE[61]: controls whether hardware updating of PTE A/D bits is enabled for
+// S-mode and G-stage address translations (Svadu).
+constexpr uint64_t ADUE = 0b1ull << 61;
 
 // STCE[63]: enables the Sstc extension, which lets S-mode program stimecmp
 // and take timer interrupts directly instead of trapping to M-mode.
@@ -339,64 +345,17 @@ constexpr uint64_t csrrc(csr_register<R>, uint64_t mask) noexcept {
     return previous;
 }
 
-// The immediate forms. zimm is a 5-bit unsigned field encoded in the
-// instruction, so it is a template parameter rather than a function argument;
-// call them as csrsi<2>(sstatus). Like their register counterparts, csrrwi/
-// csrrsi/csrrci return the old value and the csrwi/csrsi/csrci spellings
-// discard it.
-template <uint64_t Imm, auto R>
-constexpr void csrwi(csr_register<R>) noexcept {
-    static_assert(Imm < 32, "zimm is a 5-bit unsigned field");
-    asm volatile((format_staticstr("csrwi {}, %0", R)) : : "K"(Imm) : "memory");
-}
-
-template <uint64_t Imm, auto R>
-constexpr void csrsi(csr_register<R>) noexcept {
-    static_assert(Imm < 32, "zimm is a 5-bit unsigned field");
-    asm volatile((format_staticstr("csrsi {}, %0", R)) : : "K"(Imm) : "memory");
-}
-
-template <uint64_t Imm, auto R>
-constexpr void csrci(csr_register<R>) noexcept {
-    static_assert(Imm < 32, "zimm is a 5-bit unsigned field");
-    asm volatile((format_staticstr("csrci {}, %0", R)) : : "K"(Imm) : "memory");
-}
-
-template <uint64_t Imm, auto R>
-constexpr uint64_t csrrwi(csr_register<R>) noexcept {
-    static_assert(Imm < 32, "zimm is a 5-bit unsigned field");
-    uint64_t previous;
-    asm volatile((format_staticstr("csrrwi %0, {}, %1", R)) : "=r"(previous) : "K"(Imm) : "memory");
-    return previous;
-}
-
-template <uint64_t Imm, auto R>
-constexpr uint64_t csrrsi(csr_register<R>) noexcept {
-    static_assert(Imm < 32, "zimm is a 5-bit unsigned field");
-    uint64_t previous;
-    asm volatile((format_staticstr("csrrsi %0, {}, %1", R)) : "=r"(previous) : "K"(Imm) : "memory");
-    return previous;
-}
-
-template <uint64_t Imm, auto R>
-constexpr uint64_t csrrci(csr_register<R>) noexcept {
-    static_assert(Imm < 32, "zimm is a 5-bit unsigned field");
-    uint64_t previous;
-    asm volatile((format_staticstr("csrrci %0, {}, %1", R)) : "=r"(previous) : "K"(Imm) : "memory");
-    return previous;
-}
-
-// Plain GPR access. These are not CSR instructions: they exist for `tp`, the
-// one entry in registers:: that is an integer register rather than a CSR.
+// Plain GPR access (not CSR instructions), constrained to gpr_register so a CSR
+// cannot be passed here by mistake.
 template <auto R>
-constexpr uint64_t read(csr_register<R>) noexcept {
+constexpr uint64_t read(gpr_register<R>) noexcept {
     uint64_t value;
     asm volatile((format_staticstr("mv %0, {}", R)) : "=r"(value));
     return value;
 }
 
 template <auto R>
-constexpr void write(csr_register<R>, uint64_t value) noexcept {
+constexpr void write(gpr_register<R>, uint64_t value) noexcept {
     asm volatile((format_staticstr("mv {}, %0", R)) : : "r"(value) : "memory");
 }
 

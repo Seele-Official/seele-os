@@ -22,10 +22,9 @@ namespace driver {
 // controller; Device for ordinary peripherals; Late for drivers that need
 // interrupts or a work queue.
 //
-// There is deliberately no Early level. The console and the other things that
-// must work before paging are firmware-shaped and live in src/kernel/early:
-// they cannot depend on device enumeration, the private-state arena or the
-// console lock.
+// There is deliberately no Early level. Pre-paging output is platform-shaped
+// and lives in platform/early_console.h: it cannot depend on device
+// enumeration, the private-state arena, or the console lock.
 enum class InitLevel : uint8_t {
     Core,
     Device,
@@ -34,7 +33,7 @@ enum class InitLevel : uint8_t {
 
 // Alignment guaranteed by the private-state arena. Drivers that construct
 // their object there should assert that its alignment fits this contract.
-constexpr inline size_t PRIVATE_STATE_ALIGN = 16;
+constexpr size_t PRIVATE_STATE_ALIGN = 16;
 
 // `priv` is the driver's zero-initialised state block (or nullptr when
 // priv_size is zero), aligned to 16 bytes -- the fundamental alignment. A
@@ -55,7 +54,7 @@ struct descriptor {
 
 // Every driver in the image, in registration order. Implemented by
 // drivers/table.cc; the driver core only iterates it.
-[[nodiscard]] std::span<const descriptor> registered() noexcept;
+[[nodiscard]] std::span<const descriptor* const> registered() noexcept;
 
 // The descriptor that should drive `device`: the match with the highest
 // priority, earliest registration first on a tie. nullptr when nothing matches.
@@ -69,11 +68,3 @@ void probe(InitLevel level, std::span<device::Device> devices) noexcept;
 void probe_all(std::span<device::Device> devices) noexcept;
 
 }  // namespace driver
-
-// One line per driver in drivers/table.cc: expands to a braced initialiser for
-// that file's `constinit const descriptor kDrivers[]`, so it must appear inside
-// the array's initialiser list.
-#define SEELE_DRIVER(tag, match, level, priority, priv_size, probe)                                \
-    ::driver::descriptor {                                                                         \
-        #tag, match, level, priority, priv_size, probe                                             \
-    }

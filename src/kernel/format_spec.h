@@ -79,7 +79,7 @@ struct format_spec {
 // body.
 //
 // This is the only implementation of the grammar. format_check walks a literal
-// at compile time and turns nullopt into a diagnostic; vprint_locked walks the
+// at compile time and turns nullopt into a diagnostic; vprint_common walks the
 // string_view it was handed at run time and prints a rejected placeholder
 // literally. Sharing the parser is what keeps "what compiles" and "what prints"
 // from drifting apart.

@@ -1,5 +1,5 @@
 #pragma once
-#include "trap.h"
+
 // Processes provide the address space; threads are the scheduling units.
 // Kernel threads are created in a system process. Until cross-hart scheduling
 // is implemented, each hart has its own system process, shared by all of its
@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "trap.h"
 #include "mm/addr.h"
 
 namespace proc {
@@ -22,7 +23,7 @@ struct thread;
 // One kernel process: an address space and the stack accounting of its threads.
 //
 // `satp` is the full CSR value to load -- MODE_SV39 | (pagetable >> PGSHIFT),
-// built by make_proc() -- kept ready so shed/switch.S can write it with a
+// built by make_proc() -- kept ready so sched/switch.S can write it with a
 // single csrw when a thread of this process is scheduled. It must sit at
 // offset 0: the assembly reads it with `ld t0, (t1)` before the satp write,
 // and the static_assert below pins that. `pagetable` is the physical address
@@ -63,7 +64,7 @@ static_assert(offsetof(process, satp) == 0, "switch.S reads satp at the start of
 // to switch_thread(); a new thread instead enters its configured entry point.
 // Trap entry separately preserves the interrupted caller-saved registers.
 //
-// The layout is part of the contract with shed/switch.S: the assembly reads
+// The layout is part of the contract with sched/switch.S: the assembly reads
 // and writes these fields at fixed offsets from a thread pointer, and the
 // static_asserts below pin them. Do not reorder the members.
 struct kernel_context {

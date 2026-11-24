@@ -101,14 +101,14 @@ void run_probe(device::Device& device, const descriptor& descriptor, void* priv)
 }
 
 // Sort this level's descriptors by (priority descending, registration order).
-// The list is tiny and rebuilt per level, so insertion sort keeps the state
-// simple; the array is static to avoid a stack copy of the table on boot.
+// The list is tiny and rebuilt per level, so insertion sort keeps it simple.
 void order_level(InitLevel level, const descriptor** order, size_t& order_count) noexcept {
     order_count = 0;
-    for(const descriptor& descriptor: registered()) {
-        if(descriptor.level != level) {
+    for(const descriptor* entry: registered()) {
+        if(entry == nullptr || entry->level != level) {
             continue;
         }
+        const descriptor& descriptor = *entry;
         if(order_count == MAX_DRIVERS) {
             LOG_WARN("driver: more than {} descriptors in one level, ignoring {}",
                      MAX_DRIVERS,
@@ -131,10 +131,11 @@ void order_level(InitLevel level, const descriptor** order, size_t& order_count)
 
 const descriptor* match(const device::Device& device) noexcept {
     const descriptor* best = nullptr;
-    for(const descriptor& descriptor: registered()) {
-        if(descriptor.match == nullptr) {
+    for(const descriptor* entry: registered()) {
+        if(entry == nullptr || entry->match == nullptr) {
             continue;
         }
+        const descriptor& descriptor = *entry;
 
         bool matches = false;
         for(const char* const* id = descriptor.match; *id != nullptr; ++id) {
@@ -155,7 +156,7 @@ const descriptor* match(const device::Device& device) noexcept {
 }
 
 void probe(InitLevel level, std::span<device::Device> devices) noexcept {
-    const static descriptor* order[MAX_DRIVERS];
+    const descriptor* order[MAX_DRIVERS];
     size_t order_count = 0;
     order_level(level, order, order_count);
 

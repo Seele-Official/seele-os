@@ -21,13 +21,13 @@ namespace {
 // final once init() returns, and runtime mapping only fills the levels below
 // them, so every process root that copied an entry keeps seeing the same
 // subtree.
-riscv::PageTable* k_pagetable = nullptr;
+riscv::PageTable* g_kernel_pagetable = nullptr;
 
 // Serializes mutation of the shared heap page-table subtrees after boot. Every
 // process root and the kernel root point at the same level-1 tables under the
 // heap arenas, so the heap's allocate-and-link step in walk() must not race
 // between harts.
-Spinlock k_pt_lock{};
+Spinlock g_kernel_pt_lock{};
 
 template <uint8_t level>
 constexpr uint64_t PX(Vaddr va) noexcept {
@@ -270,15 +270,7 @@ void reserve_empty_level1(riscv::PageTable* root, uint64_t index, const char* na
 
     riscv::PageTable* table = PA2PT(page);
     memset(table, 0, riscv::PGSIZE);
-
-    // One read-back comparison covers all three postconditions: valid, no R/W/X
-    // (so a table link, not a leaf), and pointing at the fresh table.
-    const riscv::PageTableEntry link = PT2PTE(table) | riscv::PTE_V;
-    (*root)[index] = link;
-    SEELE_ASSERT((*root)[index] == link,
-                 "vm: the {} root entry {} is not a V-only link to the new table",
-                 name,
-                 index);
+    (*root)[index] = PT2PTE(table) | riscv::PTE_V;
 }
 
 // Assert every kernel root entry covering [va, va + size) was reserved by
@@ -294,7 +286,7 @@ void require_reserved_root(Vaddr va, uint64_t size) noexcept {
                  size);
     const Vaddr end = va + size;
     for(uint64_t index = PX<2>(va); index <= PX<2>(end - 1); ++index) {
-        const riscv::PageTableEntry pte = (*k_pagetable)[index];
+        const riscv::PageTableEntry pte = (*g_kernel_pagetable)[index];
         SEELE_ASSERT((pte & riscv::PTE_V) != 0 && (pte & PTE_RWX) == 0,
                      "vm: root entry {} for [{:#x}, {:#x}) is not a reserved table",
                      index,
@@ -310,17 +302,11 @@ void require_reserved_root(Vaddr va, uint64_t size) noexcept {
     return pte == nullptr ? 0 : (*pte & riscv::PTE_LEAF_MASK);
 }
 
-// A page-aligned physical span [begin, end) inside the direct map.
-struct page_span {
-    Paddr begin;
-    Paddr end;
-};
-
 // Round [base, base + size) out to whole pages and clamp it to the direct map.
 // Returns std::nullopt when there is nothing to map. Over-covering a partial
 // page is harmless: the bytes around the range may be accessed through the same
 // page, and map_ranges() merges the result with its neighbours.
-[[nodiscard]] std::optional<page_span> direct_range(Paddr base, uint64_t size) noexcept {
+[[nodiscard]] std::optional<phys_range> direct_range(Paddr base, uint64_t size) noexcept {
     if(size == 0 || base >= DIRECT_MAP_END) {
         return std::nullopt;
     }
@@ -329,38 +315,23 @@ struct page_span {
     }
     // The clamped end is inside the direct map, so rounding up cannot wrap and
     // the result always covers at least one page.
-    return page_span{align_down(base), align_up(range_end(base, size))};
+    const Paddr begin = align_down(base);
+    const Paddr end = align_up(range_end(base, size));
+    return phys_range{begin, end - begin};
 }
 
 // Map the union of `ranges` at its direct-map alias, read/write and
 // non-executable. Firmware describes the same memory more than once and in no
-// particular order, so sort and merge first. Insertion sort is enough for the
-// small fixed arrays below, and there is no heap.
-void map_ranges(std::span<page_span> ranges) noexcept {
-    for(size_t i = 1; i < ranges.size(); ++i) {
-        const page_span key = ranges[i];
-        size_t j = i;
-        while(j > 0 && ranges[j - 1].begin > key.begin) {
-            ranges[j] = ranges[j - 1];
-            --j;
-        }
-        ranges[j] = key;
-    }
-
-    for(size_t i = 0; i < ranges.size(); ++i) {
-        page_span merged = ranges[i];
-        while(i + 1 < ranges.size() && ranges[i + 1].begin <= merged.end) {
-            if(ranges[i + 1].end > merged.end) {
-                merged.end = ranges[i + 1].end;
-            }
-            ++i;
-        }
-        if(!map_pages<true>(k_pagetable,
-                            P2V(merged.begin),
-                            merged.end - merged.begin,
-                            merged.begin,
+// particular order, so sort and merge first.
+void map_ranges(std::span<phys_range> ranges) noexcept {
+    const size_t merged_count = normalize_ranges(ranges);
+    for(const phys_range& merged: ranges.first(merged_count)) {
+        if(!map_pages<true>(g_kernel_pagetable,
+                            P2V(merged.base),
+                            merged.size,
+                            merged.base,
                             PTE_KERNEL_RW)) {
-            panic("vm: out of memory building the kernel page tables");
+            SEELE_PANIC("vm: out of memory building the kernel page tables");
         }
     }
 }
@@ -377,16 +348,19 @@ void map_ranges(std::span<page_span> ranges) noexcept {
 void map_image(riscv::PageTable* table, std::byte* begin, std::byte* end, uint64_t perm) noexcept {
     const Vaddr va = vaddr(begin);
     if(!vm::mappages(table, va, static_cast<uint64_t>(end - begin), V2P(va), perm)) {
-        panic("vm: out of memory mapping the kernel image");
+        SEELE_PANIC("vm: out of memory mapping the kernel image");
     }
 }
 
 // Direct map every physical range in `list` as RW/NX.
 void map_phys_list(std::span<const phys_range> list) noexcept {
-    page_span ranges[platform::MAX_REGIONS];
+    phys_range ranges[platform::MAX_REGIONS];
     size_t count = 0;
     for(const phys_range& region: list) {
         if(const auto range = direct_range(region.base, region.size)) {
+            SEELE_ASSERT(count < platform::MAX_REGIONS,
+                         "vm: physical region count exceeds MAX_REGIONS ({})",
+                         platform::MAX_REGIONS);
             ranges[count++] = *range;
         }
     }
@@ -401,11 +375,14 @@ void map_physical_memory(const platform::MemoryMap& memory) noexcept {
 
 // Map every device MMIO window read/write and non-executable.
 void map_devices(std::span<const device::Device> devices) noexcept {
-    page_span ranges[device::MAX_RESOURCES];
+    phys_range ranges[device::MAX_RESOURCES];
     size_t count = 0;
     for(const device::Device& entry: devices) {
         for(const phys_range& mmio: entry.mmios()) {
             if(const auto range = direct_range(mmio.base, mmio.size)) {
+                SEELE_ASSERT(count < device::MAX_RESOURCES,
+                             "vm: device MMIO count exceeds MAX_RESOURCES ({})",
+                             device::MAX_RESOURCES);
                 ranges[count++] = *range;
             }
         }
@@ -421,10 +398,10 @@ void init(const platform::MemoryMap& memory, std::span<const device::Device> dev
     // level-1 table into it.
     const Paddr root = phymem::alloc();
     if(is_null(root)) {
-        panic("vm: out of memory allocating the kernel page table");
+        SEELE_PANIC("vm: out of memory allocating the kernel page table");
     }
-    k_pagetable = PA2PT(root);
-    memset(k_pagetable, 0, riscv::PGSIZE);
+    g_kernel_pagetable = PA2PT(root);
+    memset(g_kernel_pagetable, 0, riscv::PGSIZE);
 
     // Linker.ld orders the image so that each permission group starts on a page
     // boundary and the group before it is padded to that boundary. The gaps are
@@ -434,9 +411,9 @@ void init(const platform::MemoryMap& memory, std::span<const device::Device> dev
     //   .text                          R+X
     //   .rodata                        R
     //   .data + .init_array + .bss     R+W
-    map_image(k_pagetable, vm::TEXT.start, vm::RODATA.start, riscv::PTE_R | riscv::PTE_X);
-    map_image(k_pagetable, vm::RODATA.start, vm::DATA.start, riscv::PTE_R);
-    map_image(k_pagetable, vm::DATA.start, vm::IMAGE.end, PTE_KERNEL_RW);
+    map_image(g_kernel_pagetable, vm::TEXT.start, vm::RODATA.start, riscv::PTE_R | riscv::PTE_X);
+    map_image(g_kernel_pagetable, vm::RODATA.start, vm::DATA.start, riscv::PTE_R);
+    map_image(g_kernel_pagetable, vm::DATA.start, vm::IMAGE.end, PTE_KERNEL_RW);
 
     // The boot stack pool lives after _end, outside the image groups, and every
     // hart is still running on it when it enables paging with a process table
@@ -445,7 +422,7 @@ void init(const platform::MemoryMap& memory, std::span<const device::Device> dev
     // not depend on that: map it here, before the region pass, whose leaf-skipping
     // then leaves these pages alone. The linker script asserts the pool is page
     // aligned and a whole number of pages, which is what map_image() requires.
-    map_image(k_pagetable, vm::BOOT_STACK.start, vm::BOOT_STACK.end, PTE_KERNEL_RW);
+    map_image(g_kernel_pagetable, vm::BOOT_STACK.start, vm::BOOT_STACK.end, PTE_KERNEL_RW);
 
     map_physical_memory(memory);
     map_devices(devices);
@@ -458,32 +435,33 @@ void init(const platform::MemoryMap& memory, std::span<const device::Device> dev
     // deliberately not reserved here: each process builds its own private
     // level-1 table for it in create_process_pagetable().
     for(uint64_t index = 0; index < HEAP_ARENA_COUNT; ++index) {
-        SEELE_ASSERT(((*k_pagetable)[PX<2>(heap_arena(index))] & riscv::PTE_V) == 0,
+        SEELE_ASSERT(((*g_kernel_pagetable)[PX<2>(heap_arena(index))] & riscv::PTE_V) == 0,
                      "vm: the direct map already uses heap arena {}",
                      index);
     }
 
     for(uint64_t index = 0; index < HEAP_ARENA_COUNT; ++index) {
-        reserve_empty_level1(k_pagetable, PX<2>(heap_arena(index)), "heap");
+        reserve_empty_level1(g_kernel_pagetable, PX<2>(heap_arena(index)), "heap");
     }
 
     // The point of splitting the image is W^X, and a wrong permission is only
     // discovered by the fault it causes much later. Check the first page of
     // each image group; A/D are hardware-owned and deliberately ignored here.
-    SEELE_ASSERT((leaf_perm(k_pagetable, vaddr(vm::TEXT.start)) & PTE_RWX) ==
+    SEELE_ASSERT((leaf_perm(g_kernel_pagetable, vaddr(vm::TEXT.start)) & PTE_RWX) ==
                      (riscv::PTE_R | riscv::PTE_X),
                  "vm: .text is not read/execute");
     if(vm::RODATA.size() != 0) {
-        SEELE_ASSERT((leaf_perm(k_pagetable, vaddr(vm::RODATA.start)) & PTE_RWX) == riscv::PTE_R,
+        SEELE_ASSERT((leaf_perm(g_kernel_pagetable, vaddr(vm::RODATA.start)) & PTE_RWX) ==
+                         riscv::PTE_R,
                      "vm: .rodata is not read-only");
     }
-    SEELE_ASSERT((leaf_perm(k_pagetable, vaddr(vm::DATA.start)) & PTE_RWX) ==
+    SEELE_ASSERT((leaf_perm(g_kernel_pagetable, vaddr(vm::DATA.start)) & PTE_RWX) ==
                      (riscv::PTE_R | riscv::PTE_W),
                  "vm: .data is not read/write");
 
     LOG_INFO(
         "vm: kernel page table at {:#018x}, per-process kstack window [{:#018x}, {:#018x}), " "{} thread slots of {} bytes",
-        to_uint64(V2P(vaddr(k_pagetable))),
+        to_uint64(V2P(vaddr(g_kernel_pagetable))),
         to_uint64(KSTACK_WINDOW_BASE),
         to_uint64(KSTACK_TOP),
         KSTACK_MAX_THREADS,
@@ -494,14 +472,14 @@ void init(const platform::MemoryMap& memory, std::span<const device::Device> dev
 }
 
 Paddr create_process_pagetable() noexcept {
-    SEELE_ASSERT(k_pagetable != nullptr, "vm: create_process_pagetable() before init()");
+    SEELE_ASSERT(g_kernel_pagetable != nullptr, "vm: create_process_pagetable() before init()");
 
     // The process's own root. It must be cleared before the kernel entries are
     // copied in: every root entry the kernel half does not name has to read as
     // invalid, not as the previous user's page-table contents.
     const Paddr root_pa = phymem::alloc();
     if(is_null(root_pa)) {
-        panic("vm: out of memory allocating a process page table");
+        SEELE_PANIC("vm: out of memory allocating a process page table");
     }
     riscv::PageTable* root = PA2PT(root_pa);
     memset(root, 0, riscv::PGSIZE);
@@ -512,7 +490,7 @@ Paddr create_process_pagetable() noexcept {
     // paying only for the root page and its private stack subtree. Every valid
     // entry must be a table link (V set, no R/W/X), exactly as init() left it.
     for(uint64_t index = 0; index < KERNEL_ROOT_ENTRY_COUNT; ++index) {
-        const riscv::PageTableEntry pte = (*k_pagetable)[index];
+        const riscv::PageTableEntry pte = (*g_kernel_pagetable)[index];
         if((pte & riscv::PTE_V) != 0) {
             SEELE_ASSERT((pte & PTE_RWX) == 0,
                          "vm: kernel root entry {} is not a table link",
@@ -535,7 +513,7 @@ Paddr create_process_pagetable() noexcept {
 }
 
 void map_thread_stack(Paddr pagetable, uint64_t index) noexcept {
-    SEELE_ASSERT(k_pagetable != nullptr, "vm: map_thread_stack() before init()");
+    SEELE_ASSERT(g_kernel_pagetable != nullptr, "vm: map_thread_stack() before init()");
     SEELE_ASSERT(!is_null(pagetable) && is_page_aligned(pagetable) &&
                      range_contains(DIRECT_MAP_BASE, DIRECT_MAP_END, pagetable),
                  "vm: map_thread_stack: {:#x} is not a page inside the direct map",
@@ -574,14 +552,13 @@ void map_thread_stack(Paddr pagetable, uint64_t index) noexcept {
 }
 
 void enable(Paddr pagetable) noexcept {
-    SEELE_ASSERT(k_pagetable != nullptr, "vm: enable() before init()");
+    SEELE_ASSERT(g_kernel_pagetable != nullptr, "vm: enable() before init()");
     SEELE_ASSERT(!is_null(pagetable) && is_page_aligned(pagetable) &&
                      range_contains(DIRECT_MAP_BASE, DIRECT_MAP_END, pagetable),
                  "vm: enable: {:#x} is not a page inside the direct map",
                  to_uint64(pagetable));
 
-    const uint64_t satp = riscv::csr::satp::MODE_SV39 | (to_uint64(pagetable) >> riscv::PGSHIFT);
-    riscv::csrw(riscv::registers::satp, satp);
+    riscv::csrw(riscv::registers::satp, make_satp(pagetable));
     // The root and the empty level-1 tables it links were written by ordinary
     // stores; make them visible to the next translation and drop any stale
     // entries the hart may have cached while satp was 0.
@@ -589,7 +566,7 @@ void enable(Paddr pagetable) noexcept {
 }
 
 bool mappages(Vaddr va, uint64_t size, Paddr pa) noexcept {
-    SEELE_ASSERT(k_pagetable != nullptr, "vm: mappages() before init()");
+    SEELE_ASSERT(g_kernel_pagetable != nullptr, "vm: mappages() before init()");
 
     // The heap stays below the root entries init() reserved: creating or
     // re-pointing one here would leave every process root table that copied it
@@ -599,8 +576,8 @@ bool mappages(Vaddr va, uint64_t size, Paddr pa) noexcept {
     // Other harts grow other arenas concurrently, and the levels below the
     // reserved entry are shared with every process root table: the
     // allocate-and-link step of walk() must stay serialized.
-    LockGuard guard{k_pt_lock};
-    if(!vm::mappages(k_pagetable, va, size, pa, PTE_KERNEL_RW)) {
+    LockGuard guard{g_kernel_pt_lock};
+    if(!vm::mappages(g_kernel_pagetable, va, size, pa, PTE_KERNEL_RW)) {
         return false;
     }
 

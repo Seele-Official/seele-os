@@ -13,14 +13,14 @@
 
 Jump directly to the authoritative source and doc for your task instead of scanning the repo blindly. Use [README.md](README.md) for a high-level capability/boundary summary and [docs/conventions.md](docs/conventions.md) for naming, C++ Core Guidelines & freestanding rules, comments, and doc rules.
 
-| Task Area                  | Primary Source Paths                                                                         | Read First                                   |
-| -------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| Boot & cross-module design | `src/kernel/start.S`, `start.cc`, `kmain.cc`, `hart.*`, `boot/`, `linker.ld`                 | [docs/architecture.md](docs/architecture.md) |
-| Memory, Sv39 VM & heap     | `src/kernel/mm/` (`addr.h`, `kalloc.*`, `vm.*`, `heap.*`)                                    | [docs/memory.md](docs/memory.md)             |
-| FDT, devices, drivers, I/O | `src/kernel/fdt/`, `platform/`, `drivers/`, `console.*`, `char_device.h`, `device_object.h`  | [docs/platform.md](docs/platform.md)         |
-| Threads, traps & locks     | `src/kernel/proc/`, `src/kernel/shed/` _(note spelling)_, `trap.*`, `tvec.S`, `concurrency/` | [docs/scheduling.md](docs/scheduling.md)     |
-| Logging, panic & backtrace | `src/kernel/console.*`, `panic.*`, `stacktrace.*`, `format_check.h`, `format_spec.h`         | [docs/debug.md](docs/debug.md)               |
-| Runtime, ABI & build tools | `src/libc/`, `src/cxx/runtime.cc`, `CMakeLists.txt`, `cmake/`, `tools/`, `pixi.toml`         | [docs/build.md](docs/build.md)               |
+| Task Area                  | Primary Source Paths                                                                        | Read First                                   |
+| -------------------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| Boot & cross-module design | `src/kernel/start.S`, `start.cc`, `kmain.cc`, `hart.*`, `boot/`, `linker.ld`                | [docs/architecture.md](docs/architecture.md) |
+| Memory, Sv39 VM & heap     | `src/kernel/mm/` (`addr.h`, `kalloc.*`, `vm.*`, `heap.*`)                                   | [docs/memory.md](docs/memory.md)             |
+| FDT, devices, drivers, I/O | `src/kernel/fdt/`, `platform/`, `drivers/`, `console.*`, `char_device.h`, `device_object.h` | [docs/platform.md](docs/platform.md)         |
+| Threads, traps & locks     | `src/kernel/proc/`, `src/kernel/sched/`, `trap.*`, `tvec.S`, `concurrency/`                 | [docs/scheduling.md](docs/scheduling.md)     |
+| Logging, panic & backtrace | `src/kernel/console.*`, `panic.*`, `stacktrace.*`, `format_check.h`, `format_spec.h`        | [docs/debug.md](docs/debug.md)               |
+| Runtime, ABI & build tools | `src/libc/`, `src/cxx/runtime.cc`, `CMakeLists.txt`, `cmake/`, `tools/`, `pixi.toml`        | [docs/build.md](docs/build.md)               |
 
 ## Hard Invariants & Gotchas
 
@@ -29,7 +29,7 @@ Defer detailed contracts to the docs above, but never violate these cross-cuttin
 - **Freestanding ABI.** Compiled with `-fno-exceptions -fno-rtti -nostdlib -nostartfiles -static`. No host libc, libstdc++, libgcc, libatomic, compiler-rt, or `std::terminate` implementation. Avoid non-trivial static destructors (`atexit`/`__cxa_atexit`) and new runtime/compiler-helper dependencies. Build knobs (`SEELE_*`) are injected by `CMakeLists.txt` via `-D` with no header fallback defaults.
 - **Address, memory & boot ordering.** Preserve `Paddr`/`Vaddr`/`phys_range` types and explicit ownership/lifetimes. Prefer static storage or driver arenas for permanent device objects over heap allocation. Shared kernel root PTEs freeze after `vm::k::init()`; the high-half heap is only valid after `vm::k::enable()`. Switching from boot context into `idle()` is one-way (boot stacks are freed there). DTB and the `platform`-owned `fdt::Tree` live for kernel lifetime; keep `fdt/` and `platform/` strictly below `drivers/` (no reverse includes).
 - **Hart model & hardware limits.** Kernel indexing (`cpus[]`, locks, boot stacks) uses dense `cpuid` stored in `tp` (boot hart = hardware hart 0 = `cpuid 0`), never sparse `hartid`. There is currently no cross-hart TLB shootdown and no floating-point register context save/restore.
-- **Concurrency & output locking.** Never sleep, yield, or schedule while holding a spinlock. Verify concurrency contracts before changing shared state, interrupts, page tables, or boot publication (`started`). Normal output lock order is `console` -> UART and UART IRQs take only the device lock; panic switches to lockless polling.
+- **Concurrency & output locking.** Never sleep, yield, or schedule while holding a spinlock. Verify concurrency contracts before changing shared state, interrupts, page tables, or boot publication (`g_started`). Normal output lock order is `console` -> UART and UART IRQs take only the device lock; panic switches to lockless polling.
 
 ## Environment, Commands & Formatting (Pixi-First)
 
@@ -58,8 +58,8 @@ All commands run from the repository root via Pixi ([pixi.toml](pixi.toml) is ca
 - **Toolchain boundary.** `toolchain/` is a separate repo (`seele-toolchain`). Do not edit `toolchain/`, upgrade dependencies, or rewrite lockfiles for normal kernel work. Diagnose environment issues via [docs/build.md](docs/build.md) and report missing prerequisites honestly.
 - **Formatting & pre-commit.**
     - Use `pixi run format` as the single entry point; never enumerate C/C++ files to run `clang-format` manually or invent formatting scripts.
-    - Hook coverage ([.pre-commit-config.yaml](.pre-commit-config.yaml)): general file hygiene, C/C++ (`clang-format`), Python (`ruff`), and TypeScript (`prettier`, `.ts` only—does **not** cover Markdown, JSON, or YAML).
-    - Do not stage new files just to make `--all-files` see them. Check untracked files with `pixi run pre-commit run --files <files>`, and format Markdown/JSON/YAML with `pixi run pnpm exec prettier --write <files>`.
+    - Hook coverage ([.pre-commit-config.yaml](.pre-commit-config.yaml)): general file hygiene, C/C++ (`clang-format` from the Pixi env), and Prettier (`.ts`, `.md`, `.json`, `.yaml`/`.yml`).
+    - Do not stage new files just to make `--all-files` see them. Check untracked files with `pixi run pre-commit run --files <files>`.
     - Auto-fixing hooks exit non-zero after edits: inspect the diff and re-run until clean. Never bypass failing hooks or switch to host binaries. If a full run touches unrelated files, discard those unrelated formatting edits while preserving pre-existing user changes.
 
 ## Verification & Handoff

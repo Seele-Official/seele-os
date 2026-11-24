@@ -5,9 +5,7 @@
 #include <new>
 
 #include "console.h"
-#include "hart.h"
 #include "panic.h"
-#include "riscv.h"
 #include "mm/heap.h"
 #include "mm/vm.h"
 
@@ -25,10 +23,10 @@ process* make_proc(const Paddr pagetable) noexcept {
     process* created = new process;
 
     // Keep the ready-to-load CSR value (mode bits included) next to the raw
-    // root: shed/switch.S writes `satp` straight to the CSR when a thread of
+    // root: sched/switch.S writes `satp` straight to the CSR when a thread of
     // this process is scheduled, while the page-table walk keeps using
     // `pagetable`.
-    created->satp = riscv::csr::satp::MODE_SV39 | (to_uint64(pagetable) >> riscv::PGSHIFT);
+    created->satp = vm::k::make_satp(pagetable);
     created->pagetable = pagetable;
     created->thread_count = 0;
 
