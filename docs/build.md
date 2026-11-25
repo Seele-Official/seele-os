@@ -39,13 +39,15 @@ pixi run build                    # 配置并构建 build/kernel.elf
 pixi run qemu                     # 构建、生成磁盘并启动：1 hart，build/
 pixi run qemu 4                   # 4 hart 启动
 pixi run qemu 1 build-alt         # 使用指定构建目录
+pixi run test                     # 构建 build-test/ 并在 4 hart QEMU 下运行全部 KTest 用例
+pixi run test 1 mm                # 1 hart 仅运行 mm 测试套件
 pixi run disk                     # 单独重建 build/disk.img
 ```
 
-- `configure`、`build`、`disk`、`clean` 接受可选参数 `[buildDir]`（默认 `build`）。
-- `qemu` 接受位置参数 `[harts] [buildDir]`（默认 `1 build`）；超过 `SEELE_MAX_HARTS` 的 hart 会在入口停机。
-- `configure` 仅在目标目录缺少 `CMakeCache.txt` 时套用 `qemu-virt` preset；修改已有配置需显式调用 `pixi run cmake`。
-- `qemu` 会自动执行 `setup`、`build` 与 `disk`。`disk` 会覆盖目标 `disk.img`，请勿存放持久化数据。
+- `configure`、`build`、`disk`、`clean` 接受可选参数 `[buildDir]`（默认 `build`）；`configure-test` 与 `build-test` 默认使用 `build-test`（套用 `qemu-virt-test` preset：Debug + `SEELE_TESTS=ON`）。
+- `qemu` 接受位置参数 `[harts] [buildDir]`（默认 `1 build`）；`test` 接受位置参数 `[harts] [filter] [buildDir]`（默认 `4 all build-test`）。超过 `SEELE_MAX_HARTS` 的 hart 会在入口停机。
+- `configure` 与 `configure-test` 仅在目标目录缺少 `CMakeCache.txt` 时套用对应 preset；修改已有配置需显式调用 `pixi run cmake`。
+- `qemu` 与 `test` 会自动执行 `setup`、对应构建任务与 `disk`。`disk` 会覆盖目标 `disk.img`，请勿存放持久化数据。
 - `pixi run clean <buildDir>` 递归删除目标目录，执行前须确认路径。
 
 | 工具           | 职责                                                        | 入口                                                                           |
@@ -68,9 +70,9 @@ pixi run qemu 1 build-debug
 
 ### QEMU 参数与退出方式
 
-[tools/lib/qemu.ts](../tools/lib/qemu.ts) 默认生成：`virt`、128 MiB RAM、`-bios none`、`-serial stdio -monitor none` 以及一块 1 MiB virtio-blk 测试盘（当前无块设备驱动，仅用于设备枚举）。可通过环境变量 `SEELE_QEMU` 指定 QEMU 二进制路径。
+[tools/lib/qemu.ts](../tools/lib/qemu.ts) 默认生成：`virt`、128 MiB RAM、`-bios none`、`-serial stdio -monitor none` 以及一块 1 MiB virtio-blk 测试盘（当前无块设备驱动，仅用于设备枚举），并支持按需附加 `-append`（写入 `/chosen/bootargs`）。[tools/cli.ts](../tools/cli.ts) 的 `test` 子命令额外提供看门狗超时保护（默认 30000 ms），超时仅终止本次启动的 QEMU 子进程并返回退出码 `124`。可通过环境变量 `SEELE_QEMU` 指定 QEMU 二进制路径。
 
-看到 `seele>` 提示符后，运行 `help`、`echo hello`、`info` 完成基线冒烟验证。由于串口未启用 multiplexer 且 shell 无退出命令（`Ctrl-C` 仅取消当前输入行），需要退出时应在另一终端确认本次启动的 `qemu-system-riscv64` PID 后执行 `kill -TERM <PID>`。
+看到 `seele>` 提示符后，运行 `help`、`echo hello`、`info` 完成基线冒烟验证，随后执行 `poweroff` 即可经 `sifive_test` 关机设备正常退出 QEMU。由于串口未启用 multiplexer 且 `Ctrl-C` 仅取消当前输入行，若内核停机或 shell 无响应，可在另一终端确认本次启动的 `qemu-system-riscv64` PID 后执行 `kill -TERM <PID>`。
 
 ## 3. 构建参数
 
@@ -89,6 +91,7 @@ pixi run qemu 1 build-debug
 | `SEELE_MAX_IRQ_HANDLERS`     | 16                                | 外部中断 handler 表容量                          |
 | `SEELE_FDT_MAX_DEPTH`        | 32                                | FDT 遍历深度上限                                 |
 | `SEELE_UART_BAUD`            | 115200                            | UART 目标波特率                                  |
+| `SEELE_TESTS`                | `OFF`（注入为 `0` / `1`）         | 是否编译内核自检框架 `KTest` 并在 panic 时退出   |
 | `SEELE_RISCV_ARCH`           | `rv64gc`                          | ISA 字符串                                       |
 | `SEELE_RISCV_ABI`            | `lp64d`                           | ABI                                              |
 | `SEELE_RISCV_CMODEL`         | `medany`                          | 代码模型                                         |

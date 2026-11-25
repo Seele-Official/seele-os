@@ -46,7 +46,7 @@ struct link {
 // because it lands in a different thread's stack.
 //
 // Once mycpu()->current names a thread, that thread's thread::kstack is the
-// range: every thread has its own slot in the process's kernel stack window
+// range: every thread has its own slot in the shared kernel-stack window
 // (mm/vm.h), and switch_thread() keeps the walk on the running thread's stack.
 // The boot stack is no longer accepted then, because idle() returns its pages
 // to phymem (free_boot_stack()); after that they can be handed out as page

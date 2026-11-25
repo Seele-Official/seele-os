@@ -59,6 +59,10 @@ SECTIONS {
   .rodata : {
     __rodata_start = .;
     *(.rodata .rodata.*) *(.srodata .srodata.*)
+    . = ALIGN(16);
+    __ktest_start = .;
+    KEEP(*(.ktest_cases))
+    __ktest_end = .;
     __rodata_end = .;
   } :rodata
 

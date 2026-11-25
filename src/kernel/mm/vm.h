@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <span>
 
 #include "riscv.h"
@@ -67,10 +68,12 @@ constexpr Section BOOT_STACK{linker::__boot_stack_start, linker::__boot_stack_en
 //
 //   - Direct map (root entries 0..255): identity-mapped image, RAM, and MMIO.
 //   - Heap window (root entries 256..262): seven 1 GiB arenas, grown on demand.
-//   - Per-process kstack window (root entry 508): private per-process subtree.
+//   - Shared kernel-stack window (root entry 508): 1 GiB arena of guarded
+//     per-thread kernel stacks shared across all harts and processes.
 //
-// Shared kernel root entries (0..262) freeze when init() returns; process roots
-// copy them verbatim and allocate a private level-1 table for entry 508.
+// Shared kernel root entries (0..262 and 508) freeze when init() returns; the
+// system process runs directly on `pagetable()`, and additional process roots
+// copy those frozen entries verbatim.
 namespace k {
 
 // Direct-map offset (currently identity mapped) and physical coverage bound
@@ -89,11 +92,12 @@ constexpr Paddr DIRECT_MAP_END = paddr(DIRECT_MAP_SIZE);
     return paddr(to_uint64(address) - PAGE_OFFSET);
 }
 
-// Per-process kernel stack window at Sv39 root entry 508 (128 KiB, one level-1
-// entry). Slots grow downward from KSTACK_TOP: each slot has KSTACK_SIZE mapped
-// bytes above a KSTACK_GUARD_SIZE unmapped guard page.
+// Shared kernel-stack window at Sv39 root entry 508 (1 GiB, one level-2 entry).
+// Slots grow downward from KSTACK_TOP: each slot has KSTACK_SIZE mapped RW/NX
+// bytes above an unmapped KSTACK_GUARD_SIZE guard page, giving every thread a
+// globally unique kernel stack address across all harts and processes.
 constexpr Vaddr KSTACK_WINDOW_BASE = vaddr(0xffff'ffff'0000'0000ull);
-constexpr uint64_t KSTACK_WINDOW_SIZE = 1ull << 17;
+constexpr uint64_t KSTACK_WINDOW_SIZE = 1ull << 30;
 
 #ifndef SEELE_KSTACK_SIZE
 #error "SEELE_KSTACK_SIZE is not defined: build the kernel through CMake (see CMakeLists.txt)"
@@ -133,34 +137,47 @@ constexpr uint64_t HEAP_ARENA_COUNT = 7;          // 16, 32, 64, 128, 256, 512, 
 // Build the shared kernel root page table once on the boot hart after
 // phymem::init(), while paging is still off. Maps the kernel image (W^X), boot
 // stacks, RAM, and device MMIO, then reserves empty level-1 tables for all heap
-// arenas so shared root entries freeze on return. Panics on OOM.
+// arenas and the shared kernel-stack window so shared root entries freeze on
+// return. Panics on OOM.
 void init(const platform::MemoryMap& memory, std::span<const device::Device> devices);
 
-// Allocate a process root page table after init(): copies frozen kernel root
-// entries (direct map + heap arenas) and reserves a private empty level-1 table
-// at root entry 508 for thread stacks. Stack pages are mapped on demand by
-// map_thread_stack(). Returns an inactive root Paddr; panics on OOM.
+// Physical address of the shared kernel root page table built by `init()`.
+// Serves directly as the system process's page table and as the parent template
+// copied by `create_process_pagetable()`.
+[[nodiscard]] Paddr pagetable() noexcept;
+
+// Allocate a root page table for an additional process after `init()`: copies
+// all frozen shared kernel root entries (direct map, heap arenas, and shared
+// kernel-stack window) from `pagetable()`. Returns an inactive root Paddr;
+// panics on OOM.
 [[nodiscard]] Paddr create_process_pagetable() noexcept;
 
-// Map thread slot `index` (< KSTACK_MAX_THREADS) as RW/NX in `pagetable` and
-// flush the local TLB. May target an active table; panics on OOM or if the slot
-// is already mapped.
-void map_thread_stack(Paddr pagetable, uint64_t index) noexcept;
+// Allocate or recycle a guarded `KSTACK_SIZE` kernel stack slot in the shared
+// root-508 window, returning its lowest mapped byte (`base`; stack top is
+// `base + KSTACK_SIZE`). Requires `enable()` on the calling hart; safe to call
+// concurrently across harts. Returns `std::nullopt` on OOM or slot exhaustion.
+[[nodiscard]] std::optional<Vaddr> alloc_kernel_stack() noexcept;
+
+// Return a stack `base` previously obtained from `alloc_kernel_stack()` to the
+// slot free list without unmapping its pages (preserving guard pages and
+// avoiding cross-hart TLB shootdowns). Panics if `base` is not a mapped slot
+// base; double frees are not detected.
+void free_kernel_stack(Vaddr base) noexcept;
 
 // Encode the Sv39 `satp` CSR value for root page table `pagetable`.
 [[nodiscard]] constexpr uint64_t make_satp(Paddr pagetable) noexcept {
     return riscv::csr::satp::MODE_SV39 | (to_uint64(pagetable) >> riscv::PGSHIFT);
 }
 
-// Load process root `pagetable` into this hart's `satp` and execute sfence.vma.
+// Load root `pagetable` into this hart's `satp` and execute sfence.vma.
 void enable(Paddr pagetable) noexcept;
 
 // Runtime RW/NX mapping into a pre-reserved kernel root subtree (used by
-// mm/heap.cc), serialized by the kernel page-table lock with local sfence.vma.
-// `va`, `pa`, and `size` must be page aligned, `pa` in the direct map, and
-// `[va, va + size)` unmapped under reserved root entries. Returns false on
-// page-table OOM (intermediate tables allocated so far remain linked; caller
-// retains ownership of `pa`).
+// mm/heap.cc and `alloc_kernel_stack()`), serialized by the kernel page-table
+// lock with local sfence.vma. `va`, `pa`, and `size` must be page aligned, `pa`
+// in the direct map, and `[va, va + size)` unmapped under reserved root
+// entries. Returns false on page-table OOM (intermediate tables allocated so
+// far remain linked; caller retains ownership of `pa`).
 [[nodiscard]] bool mappages(Vaddr va, uint64_t size, Paddr pa) noexcept;
 
 }  // namespace k

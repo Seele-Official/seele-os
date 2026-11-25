@@ -29,28 +29,29 @@ seele-os shell: type 'help' for commands
 seele>
 ```
 
-依次运行 `help`、`echo hello`、`info` 验证命令分发、输入回显和线程信息。shell 仅支持可打印 ASCII（单行最多 127 字符）、退格与 `Ctrl-C` 取消当前行；退出 QEMU 的方法见 [构建与运行](docs/build.md)。
+依次运行 `help`、`echo hello`、`info` 验证命令分发、输入回显和线程信息，运行 `poweroff` 正常关机退出 QEMU。shell 仅支持可打印 ASCII（单行最多 127 字符）、退格与 `Ctrl-C` 取消当前行；更多运行与测试说明见 [构建与运行](docs/build.md)。
 
 ### 常用命令
 
-| 目的             | 命令                           |
-| ---------------- | ------------------------------ |
-| 仅构建内核       | `pixi run build`               |
-| 4 hart 启动 QEMU | `pixi run qemu 4`              |
-| 指定构建目录启动 | `pixi run qemu 1 build-alt`    |
-| 配置 Debug 构建  | 见 [构建与运行](docs/build.md) |
+| 目的                   | 命令                           |
+| ---------------------- | ------------------------------ |
+| 仅构建内核             | `pixi run build`               |
+| 运行内核自检（4 hart） | `pixi run test`                |
+| 4 hart 启动 QEMU       | `pixi run qemu 4`              |
+| 指定构建目录启动       | `pixi run qemu 1 build-alt`    |
+| 配置 Debug 构建        | 见 [构建与运行](docs/build.md) |
 
 `qemu` 参数顺序为 `[harts] [buildDir]`（默认 `1 build`），默认使用 Release preset、QEMU `virt`、128 MiB RAM、`-bios none` 及 1 MiB virtio-blk 测试盘。
 
 ## 已实现与边界
 
-| 子系统     | 当前能力                                                   | 主要边界                                                        |
-| ---------- | ---------------------------------------------------------- | --------------------------------------------------------------- |
-| 启动       | M-mode 初始化、S-mode 交接、稠密 cpuid、多 hart 启动       | boot hart 固定为硬件 hart 0；仅面向 QEMU `virt`                 |
-| 平台与 I/O | FDT 解析、设备枚举、驱动探测、PLIC、16550 UART             | 外部中断仅由 boot hart 处理；尚无 virtio 驱动                   |
-| 内存       | 物理页分配、Sv39、进程根页表、每线程内核栈、`new`/`delete` | 无用户映射、缺页处理或 TLB shootdown；堆大小类别为 16–1024 字节 |
-| 线程       | 每 hart 的 idle、boot hart 的 shell、就绪/睡眠队列与唤醒   | 无运行时线程创建/退出、优先级或跨 hart 调度                     |
-| 诊断       | 格式化日志、assert/panic、帧指针调用栈                     | 无日志级别过滤；panic 后停机不恢复                              |
+| 子系统     | 当前能力                                                 | 主要边界                                                        |
+| ---------- | -------------------------------------------------------- | --------------------------------------------------------------- |
+| 启动       | M-mode 初始化、S-mode 交接、稠密 cpuid、多 hart 启动     | boot hart 固定为硬件 hart 0；仅面向 QEMU `virt`                 |
+| 平台与 I/O | FDT 解析、设备枚举、驱动探测、PLIC、16550 UART、关机设备 | 外部中断仅由 boot hart 处理；尚无 virtio 驱动                   |
+| 内存       | 物理页分配、Sv39、共享内核栈窗口、`new`/`delete`         | 无用户映射、缺页处理或 TLB shootdown；堆大小类别为 16–1024 字节 |
+| 线程       | 单系统进程、每 hart 的 idle、shell、就绪/睡眠队列与唤醒  | 无运行时线程退出、优先级或跨 hart 调度迁移                      |
+| 诊断与测试 | 格式化日志、assert/panic、帧指针调用栈、可选内核自检     | 无日志级别过滤；默认构建 panic 后停机不恢复                     |
 
 ## 文档导航
 

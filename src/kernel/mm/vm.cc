@@ -15,18 +15,17 @@
 
 namespace {
 
-// The kernel root page table, built once by init(). It is not any hart's satp:
-// each process has its own root, created by create_process_pagetable() copying
-// this table's low (direct map) and heap root entries. The entries here are
-// final once init() returns, and runtime mapping only fills the levels below
-// them, so every process root that copied an entry keeps seeing the same
-// subtree.
+// The shared kernel root page table, built once by init(). Loaded directly into
+// `satp` for the system process on every hart, and used as the parent template
+// when `create_process_pagetable()` clones frozen kernel subtrees into a new
+// process root. Root entries reserved here are final once init() returns;
+// runtime heap and kernel-stack growth only mutates lower page-table levels.
 riscv::PageTable* g_kernel_pagetable = nullptr;
 
-// Serializes mutation of the shared heap page-table subtrees after boot. Every
-// process root and the kernel root point at the same level-1 tables under the
-// heap arenas, so the heap's allocate-and-link step in walk() must not race
-// between harts.
+// Serializes runtime mutation of shared kernel page-table subtrees (heap arenas
+// and the shared kernel-stack window). Every process root shares the same
+// level-1 tables under those reserved root entries, so walk<true>()'s
+// allocate-and-link step must not race between harts.
 Spinlock g_kernel_pt_lock{};
 
 template <uint8_t level>
@@ -193,19 +192,18 @@ namespace {
 constexpr uint64_t PTE_KERNEL_RW = riscv::PTE_R | riscv::PTE_W;
 constexpr uint64_t PTE_RWX = riscv::PTE_R | riscv::PTE_W | riscv::PTE_X;
 
-// The per-process kernel stack window is one fixed virtual window, repeated in
-// every process root table. It has to start on an Sv39 root boundary (so one
-// root entry covers it) and its mapped slots have to stay inside one level-1
-// entry (so create_process_pagetable() needs one private level-1 table for
-// every stack of the process).
-static_assert(PX<2>(KSTACK_WINDOW_BASE) == 508, "the kstack window must be root entry 508");
+// The shared kernel-stack window occupies Sv39 root entry 508 (one 1 GiB
+// level-2 entry backed by a single shared level-1 table). Every slot consists
+// of `KSTACK_SIZE` mapped bytes above an unmapped `KSTACK_GUARD_SIZE` guard
+// page, all contained within root entry 508.
+constexpr uint64_t KSTACK_ROOT_INDEX = PX<2>(KSTACK_WINDOW_BASE);
+static_assert(KSTACK_ROOT_INDEX == 508, "the kstack window must be root entry 508");
 static_assert(to_uint64(KSTACK_WINDOW_BASE) % (1ull << 30) == 0,
               "the kstack window must start on an Sv39 level-2 boundary");
-static_assert(to_uint64(KSTACK_WINDOW_BASE) % (1ull << 21) == 0,
-              "the kstack window must start on an Sv39 level-1 boundary");
-static_assert(KSTACK_WINDOW_SIZE == 1ull << 17, "the kstack window must stay 128 KiB");
-static_assert(KSTACK_WINDOW_SIZE % riscv::PGSIZE == 0, "the kstack window must be page sized");
-static_assert(KSTACK_SIZE <= KSTACK_WINDOW_SIZE, "a kernel stack must fit in its window");
+static_assert(KSTACK_WINDOW_SIZE == 1ull << 30,
+              "the kstack window must span one 1 GiB Sv39 root entry");
+static_assert(PX<2>(KSTACK_TOP - 1) == KSTACK_ROOT_INDEX,
+              "the kstack window must stay inside root entry 508");
 static_assert(KSTACK_SIZE % riscv::PGSIZE == 0, "a kernel stack must be page sized");
 static_assert(KSTACK_GUARD_SIZE >= riscv::PGSIZE,
               "every stack needs at least one unmapped guard page below it");
@@ -215,34 +213,23 @@ static_assert(KSTACK_MAX_THREADS >= 2,
               "the kstack window must hold at least the idle and shell threads");
 static_assert(KSTACK_MAX_THREADS * KSTACK_SLOT_SIZE <= KSTACK_WINDOW_SIZE,
               "thread stacks must not exceed the planned kstack window");
-static_assert(PX<2>(KSTACK_BASE) == PX<2>(KSTACK_WINDOW_BASE),
+static_assert(PX<2>(KSTACK_BASE) == KSTACK_ROOT_INDEX,
               "slot 0's stack must start in the kstack window's root entry");
-static_assert(PX<1>(KSTACK_BASE) == PX<1>(KSTACK_TOP - 1),
-              "slot 0's mapped stack must stay in one Sv39 level-1 entry");
-static_assert(PX<2>(kstack_slot_base(KSTACK_MAX_THREADS - 1)) == PX<2>(KSTACK_WINDOW_BASE),
+static_assert(PX<2>(kstack_slot_base(KSTACK_MAX_THREADS - 1)) == KSTACK_ROOT_INDEX,
               "the lowest stack must stay in the kstack window's root entry");
-static_assert(PX<1>(kstack_slot_base(KSTACK_MAX_THREADS - 1)) == PX<1>(KSTACK_TOP - 1),
-              "every stack must stay in one Sv39 level-1 entry");
-static_assert(to_uint64(kstack_slot_base(KSTACK_MAX_THREADS - 1)) >= to_uint64(KSTACK_WINDOW_BASE),
-              "the lowest stack must stay inside the kstack window");
+static_assert(to_uint64(kstack_slot_base(KSTACK_MAX_THREADS - 1)) - KSTACK_GUARD_SIZE >=
+                  to_uint64(KSTACK_WINDOW_BASE),
+              "the lowest stack's guard page must stay inside the kstack window");
 
-// The low root entries are the kernel half that a process root table copies:
-// the direct map (root entries 0-255, including the image) plus the heap arenas.
-// Root 508 is deliberately outside this count: it is the per-process kernel
-// stack window, which every process builds privately instead of sharing.
-constexpr uint64_t KERNEL_ROOT_ENTRY_COUNT = PX<2>(heap_arena(HEAP_ARENA_COUNT));
-static_assert(KERNEL_ROOT_ENTRY_COUNT == 263,
-              "the kernel half is the direct map plus the seven heap arenas");
-static_assert(KERNEL_ROOT_ENTRY_COUNT <= PX<2>(KSTACK_WINDOW_BASE),
-              "the kernel half must stay below the per-process stack root entry");
+// Contiguous low/high-start root entries copied into process root tables:
+// direct map (0..255) plus the seven heap arenas (256..262). Root entry 508
+// (the shared kernel-stack window) is also copied alongside this range.
+constexpr uint64_t KERNEL_LOW_ROOT_COUNT = PX<2>(heap_arena(HEAP_ARENA_COUNT));
+static_assert(KERNEL_LOW_ROOT_COUNT == 263,
+              "the contiguous kernel root prefix is the direct map plus seven heap arenas");
+static_assert(KERNEL_LOW_ROOT_COUNT <= KSTACK_ROOT_INDEX,
+              "the contiguous kernel root prefix must stay below the kstack root entry");
 
-// Five assertions pin the heap window's contract: it starts at the bottom of the
-// high half (which is only true while the direct map fills Sv39's low half, i.e.
-// while DIRECT_MAP_SIZE is 2^38), that start is a level-2 boundary, each arena is
-// a whole number of pages, the arenas are consecutive level-2 entries, and the
-// window ends below the kstack window. Pinning HEAP_BASE's value is what makes a
-// change to the direct map's extent fail here instead of building a window that
-// overlaps it, or that is not a canonical address at all.
 static_assert(to_uint64(HEAP_BASE) == 0xffff'ffc0'0000'0000ull,
               "the heap window must start at the bottom of Sv39's high half");
 static_assert(to_uint64(HEAP_BASE) % HEAP_ARENA_SIZE == 0,
@@ -254,14 +241,22 @@ static_assert(PX<2>(heap_arena(HEAP_ARENA_COUNT - 1)) ==
 static_assert(heap_arena(HEAP_ARENA_COUNT) <= KSTACK_WINDOW_BASE,
               "the heap window must stay below the kstack window");
 
+// Intrusive free list + high-water mark for guarded kernel-stack slots.
+// Freed slots thread their link into the lowest mapped bytes of the stack
+// itself (identical to `phymem` and `heap`), keeping pages mapped so reuse is
+// O(1) and requires no cross-hart TLB shootdown.
+struct kstack_free_node {
+    kstack_free_node* next;
+};
+
+Spinlock g_kstack_lock{};
+kstack_free_node* g_kstack_free_list = nullptr;
+uint64_t g_kstack_next_slot = 0;
+
 // Link a fresh, zeroed level-1 table into root entry `index`, with V only so
-// walk() sees a table pointer rather than a leaf. The caller has checked the
-// entry is unused. The table is not live yet in either use -- init() builds the
-// kernel root before paging is on, create_process_pagetable() builds a table
-// before enable() loads it -- so clearing through the direct-map alias is
-// enough; the later satp write and sfence.vma publish the tree. The entry is
-// final afterwards: runtime mapping only fills levels below it, so copies of it
-// in process root tables stay valid.
+// walk() sees a table pointer rather than a leaf. Called during init() before
+// paging is enabled; the entry is frozen afterwards so process root tables can
+// copy it without going stale.
 void reserve_empty_level1(riscv::PageTable* root, uint64_t index, const char* name) noexcept {
     const Paddr page = phymem::alloc();
     if(is_null(page)) {
@@ -276,9 +271,7 @@ void reserve_empty_level1(riscv::PageTable* root, uint64_t index, const char* na
 // Assert every kernel root entry covering [va, va + size) was reserved by
 // init(): valid and V-only, i.e. a table, not a leaf. Runtime kernel mapping
 // must stay below these entries; creating or re-pointing one would leave every
-// process root table that copied it stale. This checks
-// the shared kernel root only -- a process's private stack subtree is built
-// before the table is activated and never goes through this path.
+// process root table that copied it stale.
 void require_reserved_root(Vaddr va, uint64_t size) noexcept {
     SEELE_ASSERT(size != 0 && is_page_aligned(va) && is_page_multiple(size) && range_fits(va, size),
                  "vm: root range check: va={:#x} size={:#x} is not a page-aligned range",
@@ -390,24 +383,27 @@ void map_devices(std::span<const device::Device> devices) noexcept {
     map_ranges(std::span{ranges, count});
 }
 
+void copy_frozen_root_entry(riscv::PageTable* dst, uint64_t index) noexcept {
+    const riscv::PageTableEntry pte = (*g_kernel_pagetable)[index];
+    if((pte & riscv::PTE_V) != 0) {
+        SEELE_ASSERT((pte & PTE_RWX) == 0, "vm: kernel root entry {} is not a table link", index);
+    }
+    (*dst)[index] = pte;
+}
+
 }  // namespace
 
 void init(const platform::MemoryMap& memory, std::span<const device::Device> devices) {
-    // The single shared root page table every hart loads into satp. Its page
-    // comes from phymem and must be cleared before walk() links the first
-    // level-1 table into it.
+    // Allocate and zero the single shared kernel root page table.
     const Paddr root = phymem::alloc();
     if(is_null(root)) {
         SEELE_PANIC("vm: out of memory allocating the kernel page table");
     }
     g_kernel_pagetable = PA2PT(root);
     memset(g_kernel_pagetable, 0, riscv::PGSIZE);
+    g_kstack_free_list = nullptr;
+    g_kstack_next_slot = 0;
 
-    // Linker.ld orders the image so that each permission group starts on a page
-    // boundary and the group before it is padded to that boundary. The gaps are
-    // part of the preceding group (or padding), so mapping [start, next start)
-    // never leaks a page across a permission change.
-    //
     //   .text                          R+X
     //   .rodata                        R
     //   .data + .init_array + .bss     R+W
@@ -415,38 +411,29 @@ void init(const platform::MemoryMap& memory, std::span<const device::Device> dev
     map_image(g_kernel_pagetable, vm::RODATA.start, vm::DATA.start, riscv::PTE_R);
     map_image(g_kernel_pagetable, vm::DATA.start, vm::IMAGE.end, PTE_KERNEL_RW);
 
-    // The boot stack pool lives after _end, outside the image groups, and every
-    // hart is still running on it when it enables paging with a process table
-    // and, a little later, switch_thread() switches to that process's stack.
-    // Firmware normally describes the pool inside a usable RAM bank, but it must
-    // not depend on that: map it here, before the region pass, whose leaf-skipping
-    // then leaves these pages alone. The linker script asserts the pool is page
-    // aligned and a whole number of pages, which is what map_image() requires.
+    // Boot stacks stay mapped in the direct map while harts switch into idle().
     map_image(g_kernel_pagetable, vm::BOOT_STACK.start, vm::BOOT_STACK.end, PTE_KERNEL_RW);
 
     map_physical_memory(memory);
     map_devices(devices);
 
-    // One entry per heap arena becomes final here: link a fresh empty level-1
-    // table into each. Check the whole set is still invalid first -- the direct
-    // map must not have claimed an entry -- and runtime mapping then only fills
-    // the levels below, so process root tables can copy the entries without the
-    // copies going stale. The kernel stack window (root entry 508) is
-    // deliberately not reserved here: each process builds its own private
-    // level-1 table for it in create_process_pagetable().
+    // Reserve empty level-1 tables for all seven heap arenas (256..262) and for
+    // the shared kernel-stack window (508) so every shared root entry is final
+    // when init() returns.
     for(uint64_t index = 0; index < HEAP_ARENA_COUNT; ++index) {
         SEELE_ASSERT(((*g_kernel_pagetable)[PX<2>(heap_arena(index))] & riscv::PTE_V) == 0,
                      "vm: the direct map already uses heap arena {}",
                      index);
     }
+    SEELE_ASSERT(((*g_kernel_pagetable)[KSTACK_ROOT_INDEX] & riscv::PTE_V) == 0,
+                 "vm: root entry {} is already in use",
+                 KSTACK_ROOT_INDEX);
 
     for(uint64_t index = 0; index < HEAP_ARENA_COUNT; ++index) {
         reserve_empty_level1(g_kernel_pagetable, PX<2>(heap_arena(index)), "heap");
     }
+    reserve_empty_level1(g_kernel_pagetable, KSTACK_ROOT_INDEX, "kstack");
 
-    // The point of splitting the image is W^X, and a wrong permission is only
-    // discovered by the fault it causes much later. Check the first page of
-    // each image group; A/D are hardware-owned and deliberately ignored here.
     SEELE_ASSERT((leaf_perm(g_kernel_pagetable, vaddr(vm::TEXT.start)) & PTE_RWX) ==
                      (riscv::PTE_R | riscv::PTE_X),
                  "vm: .text is not read/execute");
@@ -460,7 +447,7 @@ void init(const platform::MemoryMap& memory, std::span<const device::Device> dev
                  "vm: .data is not read/write");
 
     LOG_INFO(
-        "vm: kernel page table at {:#018x}, per-process kstack window [{:#018x}, {:#018x}), " "{} thread slots of {} bytes",
+        "vm: kernel page table at {:#018x}, shared kstack window [{:#018x}, {:#018x}), " "{} slots of {} bytes",
         to_uint64(V2P(vaddr(g_kernel_pagetable))),
         to_uint64(KSTACK_WINDOW_BASE),
         to_uint64(KSTACK_TOP),
@@ -471,12 +458,14 @@ void init(const platform::MemoryMap& memory, std::span<const device::Device> dev
              to_uint64(heap_arena(HEAP_ARENA_COUNT)));
 }
 
+Paddr pagetable() noexcept {
+    SEELE_ASSERT(g_kernel_pagetable != nullptr, "vm: pagetable() before init()");
+    return V2P(vaddr(g_kernel_pagetable));
+}
+
 Paddr create_process_pagetable() noexcept {
     SEELE_ASSERT(g_kernel_pagetable != nullptr, "vm: create_process_pagetable() before init()");
 
-    // The process's own root. It must be cleared before the kernel entries are
-    // copied in: every root entry the kernel half does not name has to read as
-    // invalid, not as the previous user's page-table contents.
     const Paddr root_pa = phymem::alloc();
     if(is_null(root_pa)) {
         SEELE_PANIC("vm: out of memory allocating a process page table");
@@ -484,71 +473,76 @@ Paddr create_process_pagetable() noexcept {
     riscv::PageTable* root = PA2PT(root_pa);
     memset(root, 0, riscv::PGSIZE);
 
-    // The kernel half is a copy of the frozen kernel root entries: the image,
-    // direct map and heap arenas, all pointing at the same level-1 tables. That
-    // is what lets the process run kernel code and use the kernel heap while
-    // paying only for the root page and its private stack subtree. Every valid
-    // entry must be a table link (V set, no R/W/X), exactly as init() left it.
-    for(uint64_t index = 0; index < KERNEL_ROOT_ENTRY_COUNT; ++index) {
-        const riscv::PageTableEntry pte = (*g_kernel_pagetable)[index];
-        if((pte & riscv::PTE_V) != 0) {
-            SEELE_ASSERT((pte & PTE_RWX) == 0,
-                         "vm: kernel root entry {} is not a table link",
-                         index);
-        }
-        (*root)[index] = pte;
+    for(uint64_t index = 0; index < KERNEL_LOW_ROOT_COUNT; ++index) {
+        copy_frozen_root_entry(root, index);
     }
-
-    // The per-process kernel stack root entry is private, not copied. Reserve it
-    // as an empty level-1 table, so the root entry set is final before the table
-    // is ever loaded. The stack leaves themselves are mapped later, one thread
-    // slot at a time, by map_thread_stack(): a process gets a physical stack
-    // only when a thread that needs one is created.
-    constexpr uint64_t kstack_root_index = PX<2>(KSTACK_WINDOW_BASE);
-    SEELE_ASSERT(((*root)[kstack_root_index] & riscv::PTE_V) == 0,
-                 "vm: a copied kernel entry already uses the kstack root entry");
-    reserve_empty_level1(root, kstack_root_index, "process kstack");
+    copy_frozen_root_entry(root, KSTACK_ROOT_INDEX);
 
     return root_pa;
 }
 
-void map_thread_stack(Paddr pagetable, uint64_t index) noexcept {
-    SEELE_ASSERT(g_kernel_pagetable != nullptr, "vm: map_thread_stack() before init()");
-    SEELE_ASSERT(!is_null(pagetable) && is_page_aligned(pagetable) &&
-                     range_contains(DIRECT_MAP_BASE, DIRECT_MAP_END, pagetable),
-                 "vm: map_thread_stack: {:#x} is not a page inside the direct map",
-                 to_uint64(pagetable));
-    SEELE_ASSERT(index < KSTACK_MAX_THREADS,
-                 "vm: thread stack slot {} exceeds the {} slots in the kstack window",
-                 index,
-                 KSTACK_MAX_THREADS);
+std::optional<Vaddr> alloc_kernel_stack() noexcept {
+    SEELE_ASSERT(g_kernel_pagetable != nullptr, "vm: alloc_kernel_stack() before init()");
 
-    // The process root is a direct-map page, so its level-2 table is reachable
-    // through the ordinary alias. Entry 508 was reserved by
-    // create_process_pagetable() and must still be a V-only table link: writing
-    // stack leaves below it is the only mutation allowed here.
-    riscv::PageTable* root = PA2PT(pagetable);
-    const riscv::PageTableEntry kstack_entry = (*root)[PX<2>(KSTACK_WINDOW_BASE)];
-    SEELE_ASSERT((kstack_entry & riscv::PTE_V) != 0 &&
-                     (kstack_entry & (riscv::PTE_R | riscv::PTE_W | riscv::PTE_X)) == 0,
-                 "vm: process root entry {} is not the reserved kstack table",
-                 PX<2>(KSTACK_WINDOW_BASE));
+    LockGuard guard{g_kstack_lock};
+    if(g_kstack_free_list != nullptr) {
+        kstack_free_node* const node = g_kstack_free_list;
+        g_kstack_free_list = node->next;
+        return vaddr(node);
+    }
 
-    // The stack subtree is private to this process. Current boot callers create
-    // its kernel threads serially on one hart, so no page-table lock is needed.
-    // The system-process table is already active when its threads are created;
-    // flush the local TLB after installing their stack mappings.
-    const Vaddr base = kstack_slot_base(index);
+    if(g_kstack_next_slot >= KSTACK_MAX_THREADS) {
+        return std::nullopt;
+    }
+
+    const uint64_t slot = g_kstack_next_slot;
+    const Vaddr base = kstack_slot_base(slot);
+
     for(uint64_t offset = 0; offset < KSTACK_SIZE; offset += riscv::PGSIZE) {
         const Paddr page = phymem::alloc();
         if(is_null(page)) {
-            SEELE_PANIC("vm: out of memory allocating a kernel stack");
+            if(offset != 0) {
+                // Retire a partially mapped slot rather than unmapping shared
+                // pages without cross-hart TLB shootdown.
+                ++g_kstack_next_slot;
+            }
+            return std::nullopt;
         }
-        if(!vm::mappages(root, base + offset, riscv::PGSIZE, page, PTE_KERNEL_RW)) {
-            SEELE_PANIC("vm: out of memory mapping a kernel stack");
+        if(!mappages(base + offset, riscv::PGSIZE, page)) {
+            phymem::free(page);
+            if(offset != 0) {
+                ++g_kstack_next_slot;
+            }
+            return std::nullopt;
         }
     }
-    riscv::sfence_vma();
+
+    ++g_kstack_next_slot;
+    return base;
+}
+
+void free_kernel_stack(Vaddr base) noexcept {
+    SEELE_ASSERT(g_kernel_pagetable != nullptr, "vm: free_kernel_stack() before init()");
+    SEELE_ASSERT(range_contains(KSTACK_WINDOW_BASE, KSTACK_TOP, base),
+                 "vm: free_kernel_stack({:#018x}) is outside the kstack window",
+                 to_uint64(base));
+
+    const uint64_t distance_from_top = KSTACK_TOP - base;
+    SEELE_ASSERT(distance_from_top >= KSTACK_SIZE &&
+                     (distance_from_top - KSTACK_SIZE) % KSTACK_SLOT_SIZE == 0,
+                 "vm: free_kernel_stack({:#018x}) is not a slot base",
+                 to_uint64(base));
+    const uint64_t slot = (distance_from_top - KSTACK_SIZE) / KSTACK_SLOT_SIZE;
+
+    LockGuard guard{g_kstack_lock};
+    SEELE_ASSERT(slot < g_kstack_next_slot,
+                 "vm: free_kernel_stack({:#018x}) names unmapped slot {}",
+                 to_uint64(base),
+                 slot);
+
+    auto* const node = to_pointer<kstack_free_node>(base);
+    node->next = g_kstack_free_list;
+    g_kstack_free_list = node;
 }
 
 void enable(Paddr pagetable) noexcept {
@@ -568,14 +562,14 @@ void enable(Paddr pagetable) noexcept {
 bool mappages(Vaddr va, uint64_t size, Paddr pa) noexcept {
     SEELE_ASSERT(g_kernel_pagetable != nullptr, "vm: mappages() before init()");
 
-    // The heap stays below the root entries init() reserved: creating or
-    // re-pointing one here would leave every process root table that copied it
-    // stale.
+    // Runtime shared mappings must stay below the root entries init() reserved:
+    // creating or re-pointing one here would leave every process root table
+    // that copied it stale.
     require_reserved_root(va, size);
 
-    // Other harts grow other arenas concurrently, and the levels below the
-    // reserved entry are shared with every process root table: the
-    // allocate-and-link step of walk() must stay serialized.
+    // Other harts grow shared subtrees concurrently, and the levels below each
+    // reserved entry are shared with every process root table: walk()'s
+    // allocate-and-link step must stay serialized.
     LockGuard guard{g_kernel_pt_lock};
     if(!vm::mappages(g_kernel_pagetable, va, size, pa, PTE_KERNEL_RW)) {
         return false;

@@ -13,7 +13,7 @@
 | 0–255            | direct-map 窗口 `[0, 2^38)`：映射内核镜像、启动栈及启动期发现的 RAM、保留区与 MMIO 页 |
 | 256–262          | 共享内核堆（`HEAP_BASE = 0xffff_ffc0_0000_0000`）：7 个 1 GiB arena，每大小类别一个   |
 | 263–507、509–511 | 保留未用                                                                              |
-| 508              | 每进程私有线程栈窗口（`KSTACK_WINDOW_BASE = 0xffff_ffff_0000_0000`，大小 128 KiB）    |
+| 508              | 共享线程内核栈窗口（`KSTACK_WINDOW_BASE = 0xffff_ffff_0000_0000`，大小 1 GiB）        |
 
 ## 物理页分配器
 
@@ -42,22 +42,22 @@ boot hart 在 [kmain.cc](../src/kernel/kmain.cc) 初始化物理池后，于分�
 
 1. 按 [linker.ld](../src/kernel/linker.ld) 页对齐边界映射内核镜像：`[TEXT.start, RODATA.start)`（R+X）、`[RODATA.start, DATA.start)`（R）、`[DATA.start, IMAGE.end)`（R+W）以及独立 `NOLOAD` 段 `.stack`（`BOOT_STACK`，R+W）。
 2. 将 `Usable`/`Reserved` 内存区与设备 MMIO 裁入 direct-map、向外取整页合并后映射为 R+W 不可执行，跳过已有叶子以保留镜像权限。`Reserved` 仅表示不由物理池分配；`mmio::map()` 见 [mmio.h](../src/kernel/platform/mmio.h)，只借用此阶段建好的别名。
-3. 为堆根项 256–262 各预建一张清零的 level-1 表，不预建栈根项 508，并回读校验镜像各权限组的首个叶子。
+3. 为堆根项 256–262 与内核栈根项 508 各预建一张清零的共享 level-1 表，并回读校验镜像各权限组的首个叶子。
 
-随后 `create_process_pagetable()` 为每个进程分配根表，原样复制根项 0–262（共享子树），并为根项 508 单独预建清零的 level-1 表。**根项 0–262 在 `vm::k::init()` 后冻结**，运行期堆扩展仅写入已共享的下级页表。
+这张内核根页表由 `vm::k::pagetable()` 暴露，直接作为全局唯一系统进程 `proc::kernel_proc()` 的根页表。**共享内核根项（0–262 与 508）在 `vm::k::init()` 后冻结**；后续调用 `create_process_pagetable()` 为新进程分配根表时，原样复制根项 0–262 与 508，运行期堆与内核栈扩展仅写入已共享的下级页表。
 
-每个 hart 使用各自 idle 进程根表调用 `vm::k::enable()` 写入 `satp` 并执行本地 `sfence.vma`；secondary hart 在 acquire 读取 `g_started` 后执行相同步骤。跨进程切换时由 [switch.S](../src/kernel/sched/switch.S) 更新 `satp`。
+每个 hart 直接使用 `vm::k::pagetable()` 调用 `vm::k::enable()` 写入 `satp` 并执行本地 `sfence.vma`；secondary hart 在 acquire 读取 `g_started` 后执行相同步骤。跨进程切换时由 [switch.S](../src/kernel/sched/switch.S) 更新 `satp`（同一进程内的内核线程切换跳过 `satp` 写入）。
 
 ### 映射接口契约
 
 - **`vm::mappages()`**：要求 `va`、`pa`、`size` 页对齐，`perm` 在 `PTE_LEAF_MASK` 内且合法（W 必带 R），禁止重复映射；调用方须保证虚拟与物理地址范围有效。中途页表页分配失败时返回 `false`，不回滚已写入项且不刷新 TLB。硬件 A/D 位更新依赖 [start.cc](../src/kernel/start.cc) 配置 `menvcfg.ADUE`。
-- **`vm::k::mappages()`**：供共享堆扩展使用，在共享页表锁下添加 R+W 不可执行映射，要求所经根项已有效且非叶子，成功时执行本地 `sfence.vma`。堆每次仅映射 1 页，失败时数据页不入表。
-- **`vm::k::map_thread_stack()`**：仅在目标进程私有的根项 508 子树内映射线程栈页。
+- **`vm::k::mappages()`**：供共享堆与共享内核栈扩展使用，在共享页表锁下向已预留根项子树添加 R+W 不可执行映射，成功时执行本地 `sfence.vma`。
+- **`vm::k::alloc_kernel_stack()` / `free_kernel_stack()`**：在共享根项 508 子树内按槽分配与回收带 guard 页的线程内核栈。
 
 ## 启动栈与线程栈
 
 - **启动栈（按 hart）**：[start.S](../src/kernel/start.S) 将硬件 hart 0 固定为 `cpuid = 0`，secondary 通过 `.data` 中的 `boot_hart_seq` 原子分配稠密 `cpuid` 并写入 `tp`（超限停机）。[start.cc](../src/kernel/start.cc) 在 `.stack` 中静态分配 `boot_stacks`（布局由 [stack.h](../src/kernel/boot/stack.h) 与编译期断言约束；默认 64 槽、boot 64 KiB、secondary 8 KiB，共 568 KiB）。各 hart 切入 `idle()` 线程栈后逐页归还自身启动栈；未使用的启动栈槽位不回收。
-- **线程栈（按进程划槽）**：每进程共享虚拟窗口 `[KSTACK_WINDOW_BASE, KSTACK_TOP)`，槽 `i` 栈顶位于 `KSTACK_TOP - i * KSTACK_SLOT_SIZE`。每槽由 `KSTACK_SIZE`（默认 16 KiB）映射页与下方 4 KiB 未映射 guard 页组成，默认每进程最多 6 槽（`KSTACK_MAX_THREADS`）。[process.cc](../src/kernel/proc/process.cc) 中的 `proc::make_thread()` 原子递增 `thread_count` 取槽并逐页映射 R+W 不可执行栈页（物理页可不连续），越限或分配失败均 panic；成功后执行本地 `sfence.vma` 并在线程对象中记录 `kstack` 供回溯使用。
+- **线程栈（全局共享窗口按槽分配）**：全系统共享 1 GiB 窗口 `[KSTACK_WINDOW_BASE, KSTACK_TOP)`，槽 `i` 栈顶位于 `KSTACK_TOP - i * KSTACK_SLOT_SIZE`。每槽由 `KSTACK_SIZE`（默认 16 KiB）映射页与下方 4 KiB 未映射 guard 页组成，共可容纳 `KSTACK_MAX_THREADS`（默认 52,428）个全局唯一线程栈。`vm::k::alloc_kernel_stack()` 在锁保护下优先 O(1) 弹出已归还槽位的栈首侵入式空闲链，链空时递增高水位并经 `vm::k::mappages()` 按页映射新槽；`free_kernel_stack()` 校验槽位对齐与已映射边界后将槽挂回空闲链（保持页面映射不撤销，避免跨 hart TLB shootdown）。[process.cc](../src/kernel/proc/process.cc) 中的 `proc::make_thread()` 取槽失败时 panic，并在线程对象中记录 `kstack` 供回溯使用。
 
 ## 当前限制
 

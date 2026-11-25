@@ -19,6 +19,14 @@
 #include "sched/schedule.h"
 #include "sched/switch.h"
 
+#ifndef SEELE_TESTS
+#error "SEELE_TESTS is not defined: build the kernel through CMake (see CMakeLists.txt)"
+#endif
+
+#if SEELE_TESTS
+#include "test/ktest.h"
+#endif
+
 using namespace riscv;
 using namespace riscv::registers;
 
@@ -104,26 +112,17 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
         phymem::init(plat.memory());
         LOG_INFO("phymem: initialized");
 
-        // Build the shared kernel mappings before creating the system process's
-        // root. Every process root reuses these direct-map and heap subtrees.
+        // Build the single shared kernel root page table (direct map, heap
+        // arenas, and shared kernel-stack window) and activate it on the boot
+        // hart before touching the high-half heap or stack slots.
         vm::k::init(plat.memory(), device::all());
+        vm::k::enable(vm::k::pagetable());
 
-        // Build the process's own root page table before paging is on. It copies
-        // the kernel root entries that vm::k::init() froze, so the new table sees
-        // the same image, direct map and heap subtrees as the shared kernel table;
-        // its private kernel stack subtree is reserved but left empty until the
-        // threads that need stacks map their slots.
-        const Paddr pagetable = vm::k::create_process_pagetable();
-
-        // Enable the heap window before allocating the system process and its
-        // kernel threads; their objects live outside the direct map.
-        vm::k::enable(pagetable);
-
-        // All kernel threads created on this hart belong to its system process.
-        // For now each hart has its own because scheduling does not cross harts.
-        // Idle is the first thread, providing a fallback when no work is ready.
-        mycpu()->system = proc::make_proc(pagetable);
-        mycpu()->idle = proc::make_thread(mycpu()->system, &idle);
+        // Initialize the single kernel-lifetime system process around the
+        // shared kernel root page table; every kernel thread across all harts
+        // runs in this process.
+        proc::init(vm::k::pagetable());
+        mycpu()->idle = proc::make_thread(proc::kernel_proc(), &idle);
 
         LOG_DEBUG("boot: satp={:#018x}", riscv::csrr(satp));
 
@@ -131,26 +130,31 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
         // the installed external-interrupt controller.
         driver::probe_all(device::all());
 
+#if SEELE_TESTS
+        sched::enqueue(proc::make_thread(proc::kernel_proc(), &ktest::runner_entry));
+#else
         // Shell is another kernel thread in the system process, not a separate
         // process. Queue it only when a readable console device is attached; an
         // output-only early sink leaves this hart running idle silently.
         if(console::can_read()) {
-            sched::enqueue(proc::make_thread(mycpu()->system, &proc::shell));
+            sched::enqueue(proc::make_thread(proc::kernel_proc(), &proc::shell));
         }
+#endif
 
         g_started.store(true, std::memory_order_release);
     } else {
-        // Acquire the shared mappings before creating this hart's system
-        // process. Its kernel threads use a private stack subtree while sharing
-        // the kernel image, direct map and heap with the other harts.
+        // Wait until the boot hart has initialized the shared kernel page
+        // table, the system process, and drivers, then activate the same kernel
+        // root page table and create this hart's idle thread in `kernel_proc()`.
         while(!g_started.load(std::memory_order_acquire)) {}
         mycpu()->hartid = hartid;
-        const Paddr pagetable = vm::k::create_process_pagetable();
 
-        vm::k::enable(pagetable);
+        vm::k::enable(vm::k::pagetable());
 
-        mycpu()->system = proc::make_proc(pagetable);
-        mycpu()->idle = proc::make_thread(mycpu()->system, &idle);
+        mycpu()->idle = proc::make_thread(proc::kernel_proc(), &idle);
+#if SEELE_TESTS
+        sched::enqueue(proc::make_thread(proc::kernel_proc(), &ktest::worker_entry));
+#endif
     }
 
     SEELE_ASSERT(mycpu()->idle != nullptr, "proc: no idle thread to enter");

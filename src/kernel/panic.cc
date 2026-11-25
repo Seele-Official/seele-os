@@ -5,8 +5,13 @@
 #include <string_view>
 
 #include "console.h"
+#include "power.h"
 #include "riscv.h"
 #include "stacktrace.h"
+
+#ifndef SEELE_TESTS
+#error "SEELE_TESTS is not defined: build the kernel through CMake (see CMakeLists.txt)"
+#endif
 
 namespace {
 
@@ -18,6 +23,9 @@ namespace {
 [[noreturn]] void park() noexcept {
     riscv::intr_off();
     riscv::csrw(riscv::registers::sie, 0);
+#if SEELE_TESTS
+    power::poweroff_emergency(1);
+#endif
     while(true) {
         riscv::wfi();
     }

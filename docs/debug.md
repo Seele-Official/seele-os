@@ -33,7 +33,7 @@ stack trace:
   ...
 ```
 
-panic 入口先关闭本 hart 的 `sstatus.SIE`（防止定时器或外部中断在报告过程中切走当前线程与栈），再调用 `console::enter_panic()` 屏蔽设备中断并使常规日志静默丢弃；随后 `panic()` 与 `stacktrace::print()` 通过专用无锁紧急输出通道（`console::print_emergency()` / `println_emergency()` → `ConsoleSink::write_polled()`）直接轮询输出，使已持锁代码、trap、中断及早期启动路径均可报告现场。报告完成后清空 `sie` 并循环 `wfi()` 停住当前 hart（不自动停止其他 hart）。
+panic 入口先关闭本 hart 的 `sstatus.SIE`（防止定时器或外部中断在报告过程中切走当前线程与栈），再调用 `console::enter_panic()` 屏蔽设备中断并使常规日志静默丢弃；随后 `panic()` 与 `stacktrace::print()` 通过专用无锁紧急输出通道（`console::print_emergency()` / `println_emergency()` → `ConsoleSink::write_polled()`）直接轮询输出，使已持锁代码、trap、中断及早期启动路径均可报告现场。默认构建下报告完成后清空 `sie` 并循环 `wfi()` 停住当前 hart（不自动停止其他 hart）；启用 `SEELE_TESTS` 的测试构建下会先调用 `power::poweroff_emergency(1)` 使 QEMU 以非零退出码终止。
 
 [src/libc/stdlib.cc](../src/libc/stdlib.cc) 将 `abort()` 转发为 `panic("abort() called")`。Debug 构建启用 `_GLIBCXX_ASSERTIONS`，freestanding libstdc++ 前置条件失败（如空 `optional`/`expected` 或 `std::get()`）会经此路径停机。内核代码统一使用 `SEELE_UNREACHABLE()` 替代会产生 UB 的 `std::unreachable()`。
 
@@ -53,7 +53,15 @@ panic 入口先关闭本 hart 的 `sstatus.SIE`（防止定时器或外部中断
 pixi run riscv64-unknown-elf-addr2line -f -C -i -e build/kernel.elf 0x8000019a
 ```
 
-`-f` 输出函数名，`-C` 还原 C++ 符号，`-i` 展开内联帧。栈中打印的是**返回地址**，由于存在 2 字节 RVC 压缩指令，需结合反汇编确定调用指令精确位置。
+- `-f` 输出函数名，`-C` 还原 C++ 符号，`-i` 展开内联帧。栈中打印的是**返回地址**，由于存在 2 字节 RVC 压缩指令，需结合反汇编确定调用指令精确位置。
+
+## 内核态自检（KTest）
+
+当 CMake 开启 `SEELE_TESTS=ON`（如 `qemu-virt-test` preset，对应 `pixi run test`）时，内核编译接入 [ktest.h](../src/kernel/test/ktest.h) / [ktest.cc](../src/kernel/test/ktest.cc) 及 [src/kernel/test/](../src/kernel/test/) 下的测试套件；默认构建不编译测试目标，`.ktest_cases` 段为空。
+
+- **静态发现**：`KTEST_CASE(suite, name)` 与 `KTEST_SMP_CASE(suite, name)` 将 16 字节对齐的描述符放入 [linker.ld](../src/kernel/linker.ld) `.rodata` 内的 `.ktest_cases` 区间，无堆分配与静态构造函数。
+- **执行与多核协同**：boot hart 运行 `ktest::runner_entry()`，secondary hart 各自运行 `ktest::worker_entry()` 并通过调度器两阶段睡眠原语休眠等待。单核用例仅在 boot hart 执行；`KTEST_SMP_CASE` 唤醒全部在线 worker 并在起始栅栏对齐后并发执行（阶段间可通过 `ktest::barrier()` 同步）。断言宏默认作用于当前活跃 `ktest::current()` 上下文，无需手动传递参数；每条用例结束后均断言本 hart 中断开启且 `interrupt_depth == 0`。
+- **过滤与退出**：支持经 `/chosen/bootargs` 传入 `test=<suite>`、`test=<suite>.<name>` 或 `test=all`（无匹配项视为失败）；运行完毕打印汇总并调用 `power::poweroff()` 返回退出码 `0`（全过）或 `1`（存在 `KTEST_EXPECT*` / `KTEST_ASSERT*` 失败）。
 
 ## 排查清单
 

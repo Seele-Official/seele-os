@@ -5,6 +5,7 @@
 
 #include "console.h"
 #include "hart.h"
+#include "power.h"
 #include "riscv.h"
 
 namespace proc {
@@ -110,6 +111,7 @@ void print_help() noexcept {
     println("  help          show this list");
     println("  echo <text>   print <text>");
     println("  info          show the current thread, process and kernel stack");
+    println("  poweroff      shut down the system");
 }
 
 // Show the state the scheduler keeps: the running thread, its process and the
@@ -153,6 +155,13 @@ void execute(const input_line& line) noexcept {
         println("{}", command.arguments);
     } else if(command.command == "info") {
         print_info();
+    } else if(command.command == "poweroff") {
+        if(!power::can_poweroff()) {
+            println("shell: poweroff: no power device attached");
+            return;
+        }
+        println("shutting down...");
+        power::poweroff(0);
     } else {
         println("shell: {}: command not found (type 'help')", command.command);
     }

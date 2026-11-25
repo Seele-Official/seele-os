@@ -4,18 +4,18 @@
 
 ## 调度模型概览
 
-- 调度单位是 `proc::thread`；`proc::process` 承载共享页表与栈槽位计数。
+- 调度单位是 `proc::thread`；`proc::process` 承载进程页表与线程计数，全系统内核线程共享静态存储中的唯一系统进程 `proc::kernel_proc()`（根页表为 `vm::k::pagetable()`）。
 - 每个 hart 维护独立的 `idle`、`current`、`ready` 与 `sleeping`；`idle` 不加入 `ready`，仅在无可运行线程时兜底。
-- boot hart 在 `console::can_read()` 为真时于同一进程内创建 `shell` 线程；secondary hart 仅运行 `idle`。
+- boot hart 在 `console::can_read()` 为真时于系统进程内创建 `shell` 线程（测试构建创建 `ktest` 运行线程）；secondary hart 在同一系统进程内创建各自的 `idle`（及测试工作线程）。
 - `kerneltrap()` 在定时器和外部中断结束后调用 `sched::schedule()`；线程可主动调用 `sched::sleep()`，另有 `sched::yield()` 入口（当前无调用方）。
 
 ## 进程、线程与布局契约
 
 实现见 [process.h](../src/kernel/proc/process.h) 与 [process.cc](../src/kernel/proc/process.cc)。
 
-`process` 持有完整 `satp` 值、Sv39 根表物理地址 `pagetable` 及原子栈槽计数 `thread_count`；`thread` 指向所属 `process`，保存 `kernel_context`、`kstack { base, size }`（同时供 [stacktrace.cc](../src/kernel/stacktrace.cc) 限定回溯范围）、预留用户 `trap_frame`、原子调度状态 `state`（`ThreadState`）、所属 hart 指针 `hart`（`cpu*`）与链表指针。
+`process` 持有完整 `satp` 值、Sv39 根表物理地址 `pagetable` 及原子线程计数 `thread_count`；`thread` 指向所属 `process`，保存 `kernel_context`、`kstack { base, size }`（位于全局共享根项 508 窗口，同时供 [stacktrace.cc](../src/kernel/stacktrace.cc) 限定回溯范围）、预留用户 `trap_frame`、原子调度状态 `state`（`ThreadState`）、所属 hart 指针 `hart`（`cpu*`）与链表指针。
 
-`proc::make_thread(owner, entry)` 必须在启用可访问堆窗口的页表后调用：原子预留槽位、映射私有栈页并分配线程对象，初始化 `ra = entry`、`sp = 槽顶`、`s0..s11 = 0`、`state = Created`、`hart = nullptr`。它仅创建线程，**不加入 `ready` 队列**（须经 `sched::enqueue()` 绑定至当前 hart 并入队）；当前所有线程均在 `kmain()` 中创建，线程入口不返回。栈窗口与 guard 页布局见 [memory.md](memory.md) 与 [vm.h](../src/kernel/mm/vm.h)。
+`proc::make_thread(owner, entry)` 必须在当前 hart 启用可访问共享堆与内核栈窗口的页表后调用：经 `vm::k::alloc_kernel_stack()` 分配全局唯一带 guard 页栈槽并分配线程对象，初始化 `ra = entry`、`sp = 槽顶`、`s0..s11 = 0`、`state = Created`、`hart = nullptr`。它仅创建线程，**不加入 `ready` 队列**（须经 `sched::enqueue()` 绑定至当前 hart 并入队）；线程入口不返回。栈窗口与 guard 页布局见 [memory.md](memory.md) 与 [vm.h](../src/kernel/mm/vm.h)。
 
 ### 汇编布局契约
 
@@ -71,14 +71,14 @@
 
 ### 等待队列与信号量
 
-- [wait_queue.h](../src/kernel/concurrency/wait_queue.h) / [wait_queue.cc](../src/kernel/concurrency/wait_queue.cc) 提供外部加锁的 FIFO `WaitQueue`：等待者节点 `WaitQueue::waiter` 分配在阻塞线程自身内核栈上，零堆分配且 `WaitQueue` 平凡可析构（可用于静态存储）。`prepare_wait()` 负责调用 `sched::prepare_sleep()` 并入队；唤醒方须在持有外部锁期间通过 `pop_one()` 或 `take_all()` 摘除节点，释放锁后再调用 `sched::wake()` / `wake_all()`。
+- [wait_queue.h](../src/kernel/concurrency/wait_queue.h) / [wait_queue.cc](../src/kernel/concurrency/wait_queue.cc) 提供外部加锁的 FIFO `WaitQueue`：等待者节点 `WaitQueue::waiter` 分配在阻塞线程自身内核栈上（因根项 508 内核栈窗口在所有进程页表间全局共享，跨 hart、跨进程与中断上下文均可直接摘链），零堆分配且 `WaitQueue` 平凡可析构（可用于静态存储）。`prepare_wait()` 负责调用 `sched::prepare_sleep()` 并入队；唤醒方须在持有外部锁期间通过 `pop_one()` 或 `take_all()` 摘除节点，释放锁后再调用 `sched::wake()` / `wake_all()`。
 - [semaphore.h](../src/kernel/concurrency/semaphore.h) / [semaphore.cc](../src/kernel/concurrency/semaphore.cc) 基于 `Spinlock` 与 `WaitQueue` 实现计数信号量 `Semaphore`（`acquire()` / `try_acquire()` / `release()`），平凡可析构，采用直接名额交接（handoff）：`release()` 唤醒队首等待者时直接移交名额而不递增计数。
 
 ## 启动交接
 
-在 [kmain.cc](../src/kernel/kmain.cc) 中，boot hart 初始化页表、idle 与驱动后按需创建 shell 并经 `sched::enqueue()` 加入 `ready`，再 release 发布 `g_started`；secondary hart acquire 读取 `g_started` 后建立各自页表与 idle。
+在 [kmain.cc](../src/kernel/kmain.cc) 中，boot hart 建立并启用唯一内核根表后调用 `proc::init()` 初始化系统进程，创建 `idle`、探测驱动并按需入队 `shell`（或 `ktest` 运行线程），再 release 发布 `g_started`；secondary hart acquire 读取 `g_started` 后直接启用同一内核根表并在 `proc::kernel_proc()` 中创建各自 `idle`。
 
-每个 hart 将 `idle` 绑定至本 hart 并标为 `Running`、置 `current = idle`，用一次性的零初始化 `proc::thread old{}` 承接 boot 上下文并调用 `switch_thread(&old, idle)`（`old.proc == nullptr` 触发同值 `satp` 写入，boot 上下文此后不再恢复）。`idle()` 运行于槽 0 栈上，先将本 hart 的 boot 栈逐页归还物理分配器，再配置定时器、`stvec`、`sie.SEIE | sie.STIE` 并打开 `sstatus.SIE`，随后循环 `wfi()`。`shell` 首次运行时自行打开 `SIE`、执行 `console::flush()` 并输出提示符（见 [shell.cc](../src/kernel/proc/shell.cc)）。
+每个 hart 将 `idle` 绑定至本 hart 并标为 `Running`、置 `current = idle`，用一次性的零初始化 `proc::thread old{}` 承接 boot 上下文并调用 `switch_thread(&old, idle)`（`old.proc == nullptr` 触发同值 `satp` 写入，boot 上下文此后不再恢复）。`idle()` 运行于各自独立分配的共享内核栈槽上，先将本 hart 的 boot 栈逐页归还物理分配器，再配置定时器、`stvec`、`sie.SEIE | sie.STIE` 并打开 `sstatus.SIE`，随后循环 `wfi()`。`shell` 首次运行时自行打开 `SIE`、执行 `console::flush()` 并输出提示符（见 [shell.cc](../src/kernel/proc/shell.cc)）。
 
 ## 当前限制
 

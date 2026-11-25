@@ -1,13 +1,14 @@
 #pragma once
 
 // Processes provide the address space; threads are the scheduling units.
-// Kernel threads are created in a system process. Until cross-hart scheduling
-// is implemented, each hart has its own system process, shared by all of its
-// kernel threads rather than reserved for idle.
+// All kernel threads across every hart belong to the single kernel-lifetime
+// system process (`kernel_proc()`), whose root page table is `vm::k::pagetable()`.
 //
-// Each process has a page-table root and a private kernel stack window. Threads
-// share the address space but use distinct stack slots, so a suspended thread's
-// frames remain intact. switch_thread() changes satp only across processes.
+// Additional processes get their own page-table root (copying frozen kernel
+// root entries from `vm::k::pagetable()`), while thread kernel stacks are
+// allocated globally from the shared `vm::k::KSTACK_WINDOW_BASE` arena so every
+// thread's stack has a unique virtual address across all harts and processes.
+// `switch_thread()` reloads `satp` only when switching across distinct processes.
 
 #include <atomic>
 #include <cstddef>
@@ -22,19 +23,12 @@ namespace proc {
 
 struct thread;
 
-// One kernel process: an address space and the stack accounting of its threads.
+// One process: an address space and its thread count.
 //
-// `satp` is the full CSR value to load -- MODE_SV39 | (pagetable >> PGSHIFT),
-// built by make_proc() -- kept ready so sched/switch.S can write it with a
-// single csrw when a thread of this process is scheduled. It must sit at
-// offset 0: the assembly reads it with `ld t0, (t1)` before the satp write,
-// and the static_assert below pins that. `pagetable` is the physical address
-// of the process's Sv39 root page table; it stays a Paddr because the page is
-// named physically in the page-table walk and in satp, while the struct itself
-// lives at a heap virtual address.
-//
-// `thread_count` reserves successive stack slots; slots are not reclaimed.
-// make_thread() rejects a slot at or beyond vm::k::KSTACK_MAX_THREADS.
+// `satp` is the full CSR value to load -- MODE_SV39 | (pagetable >> PGSHIFT) --
+// kept at offset 0 so `sched/switch.S` can load it with a single `ld` before
+// writing `satp`. `pagetable` is the physical address of the process's Sv39
+// root page table. `thread_count` tracks threads created in this process.
 struct process {
     uint64_t satp;
     Paddr pagetable;
@@ -43,23 +37,25 @@ struct process {
 
 static_assert(offsetof(process, satp) == 0, "switch.S reads satp at the start of process");
 
-// Create a thread in `owner` with its own mapped kernel stack and an initial
-// context that enters `entry`. Does not enqueue or run the thread; its entry
-// must not return. Kernel thread callers use their hart's system process.
+// Initialize the single kernel-lifetime system process around `kernel_pagetable`
+// (`vm::k::pagetable()`). Called once on the boot hart before creating threads.
+void init(Paddr kernel_pagetable) noexcept;
+
+// The single system process shared by all kernel threads across every hart.
+[[nodiscard]] process* kernel_proc() noexcept;
+
+// Create a thread in `owner` with a globally unique guarded kernel stack slot
+// and an initial context that enters `entry`. Does not enqueue or run the
+// thread; its entry must not return. Kernel thread callers pass `kernel_proc()`.
 //
-// Requires an initialized owner page table and access to the kernel heap.
-// Reserves the next stack slot permanently; slot exhaustion or allocation
-// failure panics. Current callers create threads only during boot.
+// Requires `vm::k::enable()` on the calling hart (heap and shared stack window
+// accessible). Panics on stack-slot or heap exhaustion.
 [[nodiscard]] thread* make_thread(process* owner, void (*entry)()) noexcept;
 
-// Create a process around an initialized page-table root; does not build or
-// activate the page table, create threads, or schedule anything. The caller
-// must already have access to the kernel heap. Allocation failure panics.
-//
-// Boot uses this to create each hart's system process, the address space for
-// all kernel threads created on that hart. Idle is one such thread, not a
-// separate kind of process.
-[[nodiscard]] process* make_proc(const Paddr pagetable) noexcept;
+// Allocate a new process object on the kernel heap around an initialized root
+// `pagetable` (e.g. from `vm::k::create_process_pagetable()`). Does not activate
+// the page table or create threads; panics on OOM.
+[[nodiscard]] process* make_proc(Paddr pagetable) noexcept;
 
 // Switch context: return address, stack pointer and callee-saved integer
 // registers. The return address lets a resumed thread continue after its call
@@ -109,11 +105,11 @@ enum class ThreadState : uint32_t {
     return "unknown";
 }
 
-// Scheduling unit: a resumable context and private stack within a process.
-// Kernel threads point at their hart's system process. Interrupt preemption
-// and voluntary sleep/yield preserve each thread's frames on its own stack.
-// `hart` points at the per-hart `cpu` that owns this thread's run queue, or
-// nullptr while the thread is still in `Created`.
+// Scheduling unit: a resumable context and globally unique kernel stack within
+// a process. Kernel threads point at `kernel_proc()`. Interrupt preemption and
+// voluntary sleep/yield preserve each thread's frames on its own stack. `hart`
+// points at the per-hart `cpu` that owns this thread's run queue, or nullptr
+// while the thread is still in `Created`.
 struct thread {
     process* proc;
     kernel_context context;

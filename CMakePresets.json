@@ -19,12 +19,27 @@
                 "SEELE_RISCV_ABI": "lp64d",
                 "SEELE_RISCV_CMODEL": "medany"
             }
+        },
+        {
+            "name": "qemu-virt-test",
+            "inherits": "qemu-virt",
+            "displayName": "QEMU virt / GCC 16 / RV64GC (In-Kernel Tests)",
+            "description": "Debug kernel build with KTest runner and test suites enabled",
+            "binaryDir": "${sourceDir}/build-test",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SEELE_TESTS": "ON"
+            }
         }
     ],
     "buildPresets": [
         {
             "name": "qemu-virt",
             "configurePreset": "qemu-virt"
+        },
+        {
+            "name": "qemu-virt-test",
+            "configurePreset": "qemu-virt-test"
         }
     ]
 }

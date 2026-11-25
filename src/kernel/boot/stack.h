@@ -17,8 +17,8 @@
 // lets vm::k::init() map the pool in the identity map as one run and lets each
 // hart later free its own slice page by page (kmain.cc: free_boot_stack())
 // without a page being shared with its neighbour. Thread stacks are separate:
-// each thread has its own slot in its process's kernel stack window. Kernel
-// threads on a hart belong to that hart's system process.
+// each thread gets its own slot in the shared kernel-stack window, and kernel
+// threads across every hart belong to the single system process.
 //
 // The pool covers every possible cpuid, so the number of slots is exactly
 // MAX_HARTS in hart.h -- there is no separate "how many boot stacks" knob. One

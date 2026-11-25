@@ -5,6 +5,7 @@ import type { BuildPaths } from './paths.ts';
 export interface QemuCommand {
     readonly harts: number;
     readonly paths: BuildPaths;
+    readonly append?: string;
 }
 
 /** Override with SEELE_QEMU=/path/to/qemu-system-riscv64 if needed. */
@@ -12,8 +13,8 @@ export function qemuBinary(): string {
     return process.env.SEELE_QEMU ?? 'qemu-system-riscv64';
 }
 
-export function qemuArgs({ harts, paths }: QemuCommand): string[] {
-    return [
+export function qemuArgs({ harts, paths, append }: QemuCommand): string[] {
+    const args = [
         ['-machine', 'virt', '-bios', 'none', '-m', '128M', '-smp', `${harts}`],
         ['-kernel', paths.kernelElf],
         ['-nographic', '-display', 'none', '-serial', 'stdio', '-monitor', 'none'],
@@ -21,6 +22,12 @@ export function qemuArgs({ harts, paths }: QemuCommand): string[] {
         ['-drive', `file=${paths.diskImage},if=none,format=raw,id=x0`],
         ['-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0'],
     ].flat();
+
+    if (append !== undefined && append.length > 0) {
+        args.push('-append', append);
+    }
+
+    return args;
 }
 
 export function assertArtifacts(paths: BuildPaths): void {

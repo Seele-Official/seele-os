@@ -8,8 +8,8 @@
 
 1. `platform::init(dtb, hartid)`：在 [platform.cc](../src/kernel/platform/platform.cc) 静态存储中构造 `fdt::Tree`，尽力挂接 early console 后断言树有效；接着执行 `device::enumerate()` 并填充只读 `platform::Info`。
 2. 物理池、内核页表（含设备 MMIO 映射）与首个进程页表就绪并启用分页，创建 idle 进程/线程。
-3. `driver::probe_all()` 按 `Core → Device → Late` 探测并挂接驱动（当前为 PLIC 与 Ns16550）。
-4. 若 `console::can_read()` 为真则创建 shell，随后 release 发布 `g_started`。
+3. `driver::probe_all()` 按 `Core → Device → Late` 探测并挂接驱动（当前为 PLIC、`sifive_test` 与 Ns16550）。
+4. 默认构建在 `console::can_read()` 为真时创建 shell（测试构建创建 `ktest` 运行线程），随后 release 发布 `g_started`。
 
 secondary hart acquire 等待 `g_started`，不重复平台发现或驱动 probe。
 
@@ -66,7 +66,7 @@ secondary hart acquire 等待 `g_started`，不重复平台发现或驱动 probe
 - 跨全部描述符为每个 `Unbound` 设备选取最佳匹配（priority 最高、同值取先注册者）并仅 probe 一次；失败标记 `Failed` 且不重试其他驱动。
 - `priv_size > 0` 时从 1 KiB、16 字节对齐的静态 bump arena 分配零初始化存储供驱动 placement new（失败不回收，耗尽告警并标记失败）。probe 仅在 boot hart 释放 secondary 前执行，无并发竞争。
 - [device_object.h](../src/kernel/device_object.h) 提供无 RTTI 的 `device::Object`、`device::Implements<Interfaces...>` 与 `device::dyn_cast<T>()`：以每个接口对应的模板 `inline constexpr` 字节地址作为类型身份，由 `Implements` 通过 `static_cast` 返回正确偏移的接口指针。
-- 核心对 probe 返回的对象非互斥地查询 `trap::ExternalController` 与 `CharDevice`，分别接入 `trap::set_external_controller()` 和 `console::attach()`。对象与子系统借用指针均无销毁路径，存活至内核结束。
+- 核心对 probe 返回的对象非互斥地查询 `trap::ExternalController`、`CharDevice` 与 `PowerDevice`，分别接入 `trap::set_external_controller()`、`console::attach()` 和 `power::attach()`。对象与子系统借用指针均无销毁路径，存活至内核结束。
 
 ## MMIO 访问契约
 
@@ -125,6 +125,14 @@ secondary hart acquire 等待 `g_started`，不重复平台发现或驱动 probe
 
 - **Early console**（[early_console.cc](../src/kernel/platform/early_console.cc)）：独立于 `drivers/`，无分配、无日志、无锁、无中断（预留同层并列接入 OpenSBI 后端）。优先解析 `/chosen/stdout-path` 绝对路径（去 `:` 选项，校验 enabled 且兼容 `ns16550a`/`ns16550`，命中但 `reg` 无效则不再回退），未命中时 `walk()` 回退至首个匹配的 enabled 节点。挂接失败不影响启动。
 - **Ns16550 驱动**（[ns16550.cc](../src/kernel/drivers/uart/ns16550.cc)）：Device 级、priority 0，匹配 `ns16550a`/`ns16550`。按 `clock-frequency` 与 `SEELE_UART_BAUD` 设置除数（缺失或过小取 1，过大钳至 `0xffff`）、8N1 并清空 FIFO；尝试以 priority 1 注册首个 IRQ（失败则回退轮询模式仍 probe 成功）。TX 空中断按需启停；每次 handler 先收后发，各最多处理一个探测 FIFO 深度（1 或 16 字节）。RX 环满时丢弃新读出字节并递增 `rx_overrun_count()`。`set_interrupt_enable()` 写入前后复查设备 panic 闩锁，防止并发写者重开已屏蔽中断。
+
+## 系统关机：power 与 `sifive_test`
+
+[power.h](../src/kernel/power.h) / [power.cc](../src/kernel/power.cc) 定义硬件无关的 `PowerDevice` 接口与关机入口：
+
+- `power::poweroff(code)`：先调用 `console::flush()` 排空串口缓冲，再关本地中断并写入已挂接 `PowerDevice`（调用方不得持有 `console` 或 UART 锁）；无关机设备或硬件未立即断电时回落 `wfi()`。
+- `power::poweroff_emergency(code)`：供测试构建的 `panic()` 使用，不触碰锁或常规输出队列，直接转发给已挂接设备。
+- **`sifive_test` 驱动**（[sifive_test.cc](../src/kernel/drivers/power/sifive_test.cc)）：Core 级、priority 0，匹配 QEMU `virt` 的 `sifive,test1` / `sifive,test0`；`code == 0` 写入 `0x5555`（QEMU 退出码 `0`），非零 `code` 写入 `(code << 16) | 0x3333`（QEMU 以对应非零退出码终止）。
 
 ## 当前限制
 

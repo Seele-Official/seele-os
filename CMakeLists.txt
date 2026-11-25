@@ -58,7 +58,7 @@ set(SEELE_LINKER_SCRIPT
 set(SEELE_MAX_HARTS 64 CACHE STRING "Maximum number of harts, cpuid slots and boot stacks")
 set(SEELE_BOOT_STACK_SIZE 65536 CACHE STRING "Stack size of the boot hart's boot stack, in bytes")
 set(SEELE_SECONDARY_STACK_SIZE 8192 CACHE STRING "Boot stack size of every secondary hart, in bytes")
-set(SEELE_KSTACK_SIZE 16384 CACHE STRING "Kernel stack each process maps, in bytes")
+set(SEELE_KSTACK_SIZE 16384 CACHE STRING "Kernel stack each thread maps, in bytes")
 
 # Capacity of the fixed-size tables that hold firmware descriptions. Firmware
 # that exceeds them is truncated with a warning, never fatal, so these trade
@@ -76,6 +76,13 @@ set(SEELE_MAX_IRQ_HANDLERS 16 CACHE STRING "Trap external-handler table capacity
 set(SEELE_FDT_MAX_DEPTH 32 CACHE STRING "Maximum depth the FDT walkers descend")
 
 set(SEELE_UART_BAUD 115200 CACHE STRING "NS16550 line rate in bits per second")
+
+option(SEELE_TESTS "Compile the in-kernel KTest runner and test suites" OFF)
+if(SEELE_TESTS)
+    set(SEELE_TESTS_VALUE 1)
+else()
+    set(SEELE_TESTS_VALUE 0)
+endif()
 
 # Validate and normalize the integers above. `LESS`/`GREATER` on two strings
 # would compare lexicographically, so every parameter is first checked to be a
@@ -150,6 +157,7 @@ set(SEELE_KERNEL_DEFINITIONS
     SEELE_MAX_IRQ_HANDLERS=${SEELE_MAX_IRQ_HANDLERS}
     SEELE_FDT_MAX_DEPTH=${SEELE_FDT_MAX_DEPTH}
     SEELE_UART_BAUD=${SEELE_UART_BAUD}
+    SEELE_TESTS=${SEELE_TESTS_VALUE}
 )
 
 
@@ -195,6 +203,7 @@ add_executable(kernel
     src/kernel/start.cc
     src/kernel/kmain.cc
     src/kernel/panic.cc
+    src/kernel/power.cc
     src/kernel/trap.cc
     src/kernel/tvec.S
     src/kernel/console.cc
@@ -210,6 +219,7 @@ add_executable(kernel
     src/kernel/drivers/registry.cc
     src/kernel/drivers/table.cc
     src/kernel/drivers/irq/plic.cc
+    src/kernel/drivers/power/sifive_test.cc
     src/kernel/drivers/uart/ns16550.cc
     src/kernel/mm/kalloc.cc
     src/kernel/mm/heap.cc
@@ -220,6 +230,15 @@ add_executable(kernel
     src/kernel/sched/schedule.cc
     src/cxx/runtime.cc
 )
+
+if(SEELE_TESTS)
+    target_sources(kernel PRIVATE
+        src/kernel/test/ktest.cc
+        src/kernel/test/mm_test.cc
+        src/kernel/test/platform_test.cc
+        src/kernel/test/sync_test.cc
+    )
+endif()
 
 set_target_properties(kernel PROPERTIES
     OUTPUT_NAME "kernel"
@@ -274,9 +293,9 @@ message(STATUS "seele-os linker: ${SEELE_LINKER_SCRIPT}")
 message(STATUS
     "seele-os harts: max=${SEELE_MAX_HARTS} (cpuid slots, boot stacks, cpus[]) "
     "boot_stack=${SEELE_BOOT_STACK_SIZE}B secondary_stack=${SEELE_SECONDARY_STACK_SIZE}B "
-    "per_process_kstack=${SEELE_KSTACK_SIZE}B")
+    "kstack=${SEELE_KSTACK_SIZE}B")
 message(STATUS
     "seele-os capacity: regions=${SEELE_MAX_REGIONS} devices=${SEELE_MAX_DEVICES} "
     "resources=${SEELE_MAX_RESOURCES} drivers=${SEELE_MAX_DRIVERS} "
     "irq_handlers=${SEELE_MAX_IRQ_HANDLERS} fdt_depth=${SEELE_FDT_MAX_DEPTH} "
-    "uart_baud=${SEELE_UART_BAUD}")
+    "uart_baud=${SEELE_UART_BAUD} tests=${SEELE_TESTS}")

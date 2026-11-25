@@ -55,6 +55,32 @@ depends-on = [
 args = [{ arg = "harts", default = "1" }, { arg = "buildDir", default = "build" }]
 description = "Boot kernel.elf from buildDir with harts CPUs (default: 1 hart, build)."
 
+[tasks.configure-test]
+cmd = "test -f '{{ buildDir }}/CMakeCache.txt' || cmake --preset qemu-virt-test -B '{{ buildDir }}'"
+args = [{ arg = "buildDir", default = "build-test" }]
+description = "Configure the test-enabled kernel build in buildDir (default: build-test)."
+
+[tasks.build-test]
+cmd = "cmake --build '{{ buildDir }}'"
+depends-on = [{ task = "configure-test", args = ["{{ buildDir }}"] }]
+args = [{ arg = "buildDir", default = "build-test" }]
+description = "Build the test-enabled kernel.elf in buildDir (default: build-test)."
+
+# pixi matches test arguments positionally: [harts] [filter] [buildDir].
+[tasks.test]
+cmd = "pnpm run test --build-dir '{{ buildDir }}' --harts '{{ harts }}' --filter '{{ filter }}'"
+depends-on = [
+    "setup",
+    { task = "build-test", args = ["{{ buildDir }}"] },
+    { task = "disk", args = ["{{ buildDir }}"] },
+]
+args = [
+    { arg = "harts", default = "4" },
+    { arg = "filter", default = "all" },
+    { arg = "buildDir", default = "build-test" },
+]
+description = "Build and run in-kernel KTest suites in QEMU (default: 4 harts, all, build-test)."
+
 [tasks.clean]
 cmd = "cmake -E rm -rf '{{ buildDir }}'"
 args = [{ arg = "buildDir", default = "build" }]

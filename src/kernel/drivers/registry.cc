@@ -11,6 +11,7 @@
 #include <span>
 
 #include "console.h"
+#include "power.h"
 #include "trap.h"
 #include "platform/device.h"
 
@@ -74,6 +75,9 @@ void wire_device(device::Object& object) noexcept {
     }
     if(auto* chars = device::dyn_cast<CharDevice>(&object)) {
         console::attach(*chars);
+    }
+    if(auto* pwr = device::dyn_cast<PowerDevice>(&object)) {
+        power::attach(*pwr);
     }
 }
 

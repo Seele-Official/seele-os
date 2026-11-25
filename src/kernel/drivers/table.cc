@@ -11,6 +11,7 @@
 #include <span>
 
 #include "drivers/irq/plic.h"
+#include "drivers/power/sifive_test.h"
 #include "drivers/registry.h"
 #include "drivers/uart/ns16550.h"
 
@@ -18,6 +19,7 @@ namespace {
 
 constinit const driver::descriptor* const DRIVERS[] = {
     &drivers::irq::PLIC_DRIVER,
+    &drivers::power::SIFIVE_TEST_DRIVER,
     &drivers::uart::NS16550_DRIVER,
 };
 

@@ -10,7 +10,8 @@
     },
     "scripts": {
         "disk": "node tools/cli.ts disk",
-        "qemu": "node tools/cli.ts qemu"
+        "qemu": "node tools/cli.ts qemu",
+        "test": "node tools/cli.ts test"
     },
     "devDependencies": {
         "@types/node": "26.6.6",

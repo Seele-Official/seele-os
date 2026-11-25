@@ -1,8 +1,8 @@
 #pragma once
 
-// Interactive kernel thread in the boot hart's system process, created only
-// when a console is attached. It shares the system address space and has its
-// own kernel stack, just like any other kernel thread.
+// Interactive kernel thread in the system process (`proc::kernel_proc()`),
+// created only when a readable console is attached. It shares the kernel
+// address space and has its own guarded kernel stack slot.
 //
 // Console input waits in the device driver. An interrupt-driven UART can park
 // the shell until input arrives; a polling device uses its own wait path.

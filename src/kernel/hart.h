@@ -18,8 +18,9 @@
 // hart list (platform/platform.h), the per-hart `g_cpus[]` array in hart.cc and
 // the boot stack pool (boot/stack.h), so none of those bounds can drift apart:
 // every dense cpuid, and g_cpus[] is indexed by exactly that cpuid. start.cc
-// static_asserts the pool equality. Kernel stacks live per process (one slot per
-// thread, see proc/process.h), so MAX_HARTS does not bound a stack window.
+// static_asserts the pool equality. Kernel stacks live in the shared root-508
+// arena (one slot per thread, see mm/vm.h), so MAX_HARTS does not bound a
+// stack window.
 #ifndef SEELE_MAX_HARTS
 #error "SEELE_MAX_HARTS is not defined: build the kernel through CMake (see CMakeLists.txt)"
 #endif
@@ -37,14 +38,9 @@ struct cpu {
     uint32_t interrupt_depth = 0;
     bool interrupts_were_enabled = false;
 
-    // System process: all kernel threads on this hart are created in it and
-    // share its address space. Each hart currently has its own system process
-    // because cross-hart scheduling is not implemented. Null until boot creates it.
-    proc::process* system = nullptr;
-
-    // Fallback thread when this hart has no ready kernel thread. Like other
-    // kernel threads, it belongs to `system` and has its own context and stack;
-    // it is never placed on the ready or sleeping list. Null until boot creates it.
+    // Fallback thread when this hart has no ready kernel thread. Belongs to
+    // `proc::kernel_proc()` and has its own context and stack slot; never
+    // placed on the ready or sleeping list. Null until boot creates it.
     proc::thread* idle = nullptr;
 
     // This hart's currently running thread. kmain() points it at the idle
