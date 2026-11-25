@@ -14,7 +14,6 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "trap.h"
 #include "mm/addr.h"
 
 struct cpu;
@@ -60,7 +59,8 @@ void init(Paddr kernel_pagetable) noexcept;
 // Switch context: return address, stack pointer and callee-saved integer
 // registers. The return address lets a resumed thread continue after its call
 // to switch_thread(); a new thread instead enters its configured entry point.
-// Trap entry separately preserves the interrupted caller-saved registers.
+// Trap entry separately preserves the interrupted register state on the kernel
+// stack.
 //
 // The layout is part of the contract with sched/switch.S: the assembly reads
 // and writes these fields at fixed offsets from a thread pointer, and the
@@ -114,7 +114,6 @@ struct thread {
     process* proc;
     kernel_context context;
     kernel_stack kstack;
-    trap::trap_frame frame;
     std::atomic<ThreadState> state{ThreadState::Created};
     std::atomic<::cpu*> hart{nullptr};
     thread* prev = nullptr;

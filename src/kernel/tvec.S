@@ -5,34 +5,85 @@
 # sched::schedule() (voluntary blocking switches also occur via sched::sleep(),
 # and the initial one-way boot handoff happens in kmain()).
 #
-# sscratch says which side the trap came from:
+# sscratch distinguishes the origin of the trap:
 #
-#   - user side:   sscratch holds the current thread's trap_frame pointer
-#                  (trap.h). The first csrrw swaps it with x31, so x31 becomes
-#                  the trapframe and sscratch keeps the user's x31.
-#   - kernel side: sscratch is zero -- a trap taken while already in the
-#                  kernel, including a trap inside the user-side handler.
+#   - user side (sscratch != 0): sscratch points to this hart's per-hart
+#       trap::trap_scratch (trap.h):
+#         0(scratch)   kernel_sp    current thread's kstack top
+#         8(scratch)   kernel_tp    this hart's dense cpuid
+#         16(scratch)  user_sp_tmp  temporary stash for user sp
+#   - kernel side (sscratch == 0): trap taken while already in supervisor mode,
+#       including any nested trap inside the kernel.
 #
-# User path (sscratch != 0): store x1..x30 at trap_frame.x[0..29] and the old
-# x31 at 240, copy sepc/sstatus into u_epc/u_status, then clear sscratch to
-# mark "now in kernel" so a nested trap takes the kernel path. Load the frame's
-# k_sp / k_tp / next_call (the thread's kernel stack slot, the hart's cpuid and the
-# handler -- usertrap in trap.cc) and jump through next_call. The handler
-# returns the trapframe to resume in a0; after scheduling it may be a different
-# thread's frame, which is how a trap turns into a thread switch without
-# touching any state but the frames.
+# Both paths build the same 272-byte stack-allocated trap::trap_frame (trap.h)
+# on the current thread's kernel stack:
 #
-# The frame's control part (k_sp, k_tp, next_call) is prepared by whoever sends
-# a thread into user mode. Nothing does that yet -- no code enters user mode --
-# so the user path below has never run.
+#   0..240(sp)  x1..x31 (ra, sp, gp, tp, t0..t2, s0..s1, a0..a7, s2..s11, t3..t6)
+#   248(sp)     sepc
+#   256(sp)     sstatus
+#   264(sp)     reserved (8-byte padding for 16-byte stack alignment)
 #
-# Kernel path (sscratch == 0): restore x31, reserve 256 bytes below sp, save
-# the caller-saved registers at their trap_frame offsets (trap.h) and call
-# kerneltrap, then restore and sret. sscratch stays zero throughout, so a trap
-# taken inside kerneltrap re-enters this path.
-#
-# trap_frame and the offsets here are one contract: change trap.h and this
-# file together (the struct pins its own layout with static_asserts).
+# trap_frame, trap_scratch, and the offsets here are one contract: update
+# trap.h and this file together (trap.h pins every offset with static_assert).
+
+.macro SAVE_GPRS_X6_X30 base
+    sd x6,   40(\base)
+    sd x7,   48(\base)
+    sd x8,   56(\base)
+    sd x9,   64(\base)
+    sd x10,  72(\base)
+    sd x11,  80(\base)
+    sd x12,  88(\base)
+    sd x13,  96(\base)
+    sd x14, 104(\base)
+    sd x15, 112(\base)
+    sd x16, 120(\base)
+    sd x17, 128(\base)
+    sd x18, 136(\base)
+    sd x19, 144(\base)
+    sd x20, 152(\base)
+    sd x21, 160(\base)
+    sd x22, 168(\base)
+    sd x23, 176(\base)
+    sd x24, 184(\base)
+    sd x25, 192(\base)
+    sd x26, 200(\base)
+    sd x27, 208(\base)
+    sd x28, 216(\base)
+    sd x29, 224(\base)
+    sd x30, 232(\base)
+.endm
+
+.macro LOAD_GPRS_X5_X31 base
+    ld x5,   32(\base)
+    ld x6,   40(\base)
+    ld x7,   48(\base)
+    ld x8,   56(\base)
+    ld x9,   64(\base)
+    ld x10,  72(\base)
+    ld x11,  80(\base)
+    ld x12,  88(\base)
+    ld x13,  96(\base)
+    ld x14, 104(\base)
+    ld x15, 112(\base)
+    ld x16, 120(\base)
+    ld x17, 128(\base)
+    ld x18, 136(\base)
+    ld x19, 144(\base)
+    ld x20, 152(\base)
+    ld x21, 160(\base)
+    ld x22, 168(\base)
+    ld x23, 176(\base)
+    ld x24, 184(\base)
+    ld x25, 192(\base)
+    ld x26, 200(\base)
+    ld x27, 208(\base)
+    ld x28, 216(\base)
+    ld x29, 224(\base)
+    ld x30, 232(\base)
+    ld x31, 240(\base)
+.endm
+
 .section .text.tvec,"ax",@progbits
 .globl trampoline
 trampoline:
@@ -41,194 +92,145 @@ trampoline:
 .globl tvec
 .type tvec,@function
 tvec:
-    # Swap x31 with sscratch: a user-side trap yields the trapframe in x31,
-    # a kernel-side trap yields zero (and stashes x31 in sscratch).
-    csrrw x31, sscratch, x31
-    # zero means the trap was taken from the kernel
-    beqz x31, kernel
+    # Swap t6 (x31) with sscratch: a user trap yields &mycpu()->trap_scratch in
+    # t6 (and stashes user t6 in sscratch); a kernel trap yields zero.
+    csrrw t6, sscratch, t6
+    beqz t6, kernel_trap
 
-    sd x1, 0(x31)
-    sd x2, 8(x31)
-    sd x3, 16(x31)
-    sd x4, 24(x31)
-    sd x5, 32(x31)
-    sd x6, 40(x31)
-    sd x7, 48(x31)
-    sd x8, 56(x31)
-    sd x9, 64(x31)
-    sd x10, 72(x31)
-    sd x11, 80(x31)
-    sd x12, 88(x31)
-    sd x13, 96(x31)
-    sd x14, 104(x31)
-    sd x15, 112(x31)
-    sd x16, 120(x31)
-    sd x17, 128(x31)
-    sd x18, 136(x31)
-    sd x19, 144(x31)
-    sd x20, 152(x31)
-    sd x21, 160(x31)
-    sd x22, 168(x31)
-    sd x23, 176(x31)
-    sd x24, 184(x31)
-    sd x25, 192(x31)
-    sd x26, 200(x31)
-    sd x27, 208(x31)
-    sd x28, 216(x31)
-    sd x29, 224(x31)
-    sd x30, 232(x31)
+user_trap:
+    # Stash user sp in trap_scratch.user_sp_tmp, switch to this thread's kernel
+    # stack top, and reserve the 272-byte trap_frame.
+    sd sp, 16(t6)
+    ld sp, 0(t6)
+    addi sp, sp, -272
 
-    # the user's x31 is the value the swap left in sscratch
-    csrr t0, sscratch
+    # Save user t0 first so t0 can serve as temporary while retrieving user t6
+    # and user sp. Clearing sscratch atomically marks "now in kernel" so any
+    # nested trap takes kernel_trap.
+    sd t0, 32(sp)
+    csrrw t0, sscratch, zero
+    sd t0, 240(sp)
+    ld t0, 16(t6)
+    sd t0, 8(sp)
 
-    # clear sscratch: from here on we are in the kernel, so a nested trap
-    # takes the kernel path
-    csrw sscratch, x0
+    # Save the remaining user GPRs (x1, x3, x4, x6..x30).
+    sd x1,   0(sp)
+    sd x3,  16(sp)
+    sd x4,  24(sp)
+    SAVE_GPRS_X6_X30 sp
 
-    sd t0, 240(x31)
-
-    # trapframe.u_epc: the pc the user was interrupted at
+    # Save interrupted sepc and sstatus.
     csrr t0, sepc
-    sd t0, 248(x31)
-    # trapframe.u_status: sstatus as the trap left it -- SPP clear, SPIE holding
-    # the user's SIE, SIE clear -- so writing it back before sret keeps
-    # interrupts off until the sret itself
+    sd t0, 248(sp)
     csrr t0, sstatus
-    sd t0, 256(x31)
+    sd t0, 256(sp)
 
-    # trapframe.k_sp: the current thread's kernel stack slot
-    ld sp, 264(x31)
-    # trapframe.k_tp: the hart's cpuid (the thread may have been scheduled
-    # onto another hart since the frame was saved)
-    ld tp, 272(x31)
-    # trapframe.next_call: the handler to call (usertrap)
-    ld t1, 280(x31)
+    # Restore kernel tp (this hart's cpuid). The kernel builds with
+    # --no-relax-gp and does not rely on gp.
+    ld tp, 8(t6)
 
-    # the handler returns the trapframe to resume in a0; after scheduling it
-    # may be a different thread's frame. ra names tvecret explicitly so the
-    # handler's ret lands there even if the assembler pads before the label.
-    mv a0, x31
-    la ra, tvecret
-    jr t1
+    # Clear frame pointer so stacktrace::print() stops cleanly at the
+    # user/kernel boundary instead of following a user-controlled s0.
+    mv s0, zero
 
-.align 4
-# The resume half of the user path. Exported for symbolization; the handler
-# returns into tvecret.
+    # trap_scratch* usertrap(trap_frame* frame): the ABI guarantees sp still
+    # points at trap_frame on return, and a0 receives the current hart's
+    # trap_scratch* (which may differ from entry if this thread migrated).
+    mv a0, sp
+    call usertrap
+    # Fall through directly into tvecret.
+
+# User-mode return path. Contract:
+#   - sstatus.SIE == 0
+#   - sp == trap_frame* (at kstack_top - 272)
+#   - a0 == trap_scratch* (&mycpu()->trap_scratch)
+#
+# Executable page loaders (not tvecret) are responsible for executing fence.i
+# when writing user code pages.
 .globl tvecret
 .type tvecret,@function
 tvecret:
+    # Record kstack_top in this hart's trap_scratch for the next user trap.
+    addi t0, sp, 272
+    sd t0, 0(a0)
 
-    # any code the handler wrote must be visible before the resumed thread
-    # fetches it
-    fence.i
-
-    # Store the frame back into sscratch: the next trap from user mode finds
-    # its trapframe there. (From the clear at entry until this store the hart
-    # ran in the kernel with sscratch zero; after it, only the restore loop
-    # and sret remain, with interrupts still disabled from trap entry.)
-    csrw sscratch, a0
-    mv x31, a0
-
-    # trapframe.k_tp: record this hart in the frame being resumed. The frame
-    # may belong to another thread, and its next trap on this hart must find
-    # this hart's cpuid there.
-    sd tp, 272(x31)
-
-    # trapframe.u_epc: the pc to resume, after any change the handler made
-    ld t0, 248(x31)
-    # trapframe.u_status: SIE is clear in the saved value, so interrupts stay
-    # off through the register restore below and are enabled only by sret
-    ld t1, 256(x31)
-
+    # Restore sepc and sstatus. SIE is clear in saved sstatus, so interrupts
+    # stay disabled through the restore sequence and re-enable atomically on
+    # sret (SPIE -> SIE).
+    ld t0, 248(sp)
+    ld t1, 256(sp)
     csrw sepc, t0
     csrw sstatus, t1
 
-    ld x1, 0(x31)
-    ld x2, 8(x31)
-    ld x3, 16(x31)
-    ld x4, 24(x31)
-    ld x5, 32(x31)
-    ld x6, 40(x31)
-    ld x7, 48(x31)
-    ld x8, 56(x31)
-    ld x9, 64(x31)
-    ld x10, 72(x31)
-    ld x11, 80(x31)
-    ld x12, 88(x31)
-    ld x13, 96(x31)
-    ld x14, 104(x31)
-    ld x15, 112(x31)
-    ld x16, 120(x31)
-    ld x17, 128(x31)
-    ld x18, 136(x31)
-    ld x19, 144(x31)
-    ld x20, 152(x31)
-    ld x21, 160(x31)
-    ld x22, 168(x31)
-    ld x23, 176(x31)
-    ld x24, 184(x31)
-    ld x25, 192(x31)
-    ld x26, 200(x31)
-    ld x27, 208(x31)
-    ld x28, 216(x31)
-    ld x29, 224(x31)
-    ld x30, 232(x31)
-    ld x31, 240(x31)
+    # Arm sscratch with this hart's trap_scratch* before restoring user GPRs.
+    csrw sscratch, a0
+
+    # Restore x1, x3..x31 while sp still points at trap_frame.
+    ld x1,   0(sp)
+    ld x3,  16(sp)
+    ld x4,  24(sp)
+    LOAD_GPRS_X5_X31 sp
+
+    # Restore user sp (x2) last.
+    ld x2, 8(sp)
 
     sret
-kernel:
-    # x31 is zero here; swap back so sscratch returns to zero and x31 is
-    # restored to its pre-trap value.
-    csrrw x31, sscratch, x31
-    # make room to save registers.
-    addi sp, sp, -256
+    .size tvecret, .-tvecret
 
-    # save caller-saved registers at their trap_frame.x[] offsets (trap.h)
-    sd ra, 0(sp)
-    # sd sp, 8(sp)
-    sd gp, 16(sp)
-    # sd tp, 24(sp)
-    sd t0, 32(sp)
-    sd t1, 40(sp)
-    sd t2, 48(sp)
-    sd a0, 72(sp)
-    sd a1, 80(sp)
-    sd a2, 88(sp)
-    sd a3, 96(sp)
-    sd a4, 104(sp)
-    sd a5, 112(sp)
-    sd a6, 120(sp)
-    sd a7, 128(sp)
-    sd t3, 216(sp)
-    sd t4, 224(sp)
-    sd t5, 232(sp)
-    sd t6, 240(sp)
+# First-time U-mode entry: void enter_user(trap_frame* frame, trap_scratch* scratch).
+# Moves arguments into tvecret's register contract (sp = frame, a0 = scratch).
+.align 2
+.globl enter_user
+.type enter_user,@function
+enter_user:
+    mv sp, a0
+    mv a0, a1
+    j tvecret
+    .size enter_user, .-enter_user
 
-    # call the C trap handler in trap.cc
+kernel_trap:
+    # t6 is zero here; swap back to restore interrupted t6 and keep
+    # sscratch == 0.
+    csrrw t6, sscratch, t6
+
+    # Allocate the unified 272-byte trap_frame on the current kernel stack.
+    addi sp, sp, -272
+
+    # Save x1, x3..x31 into trap_frame.
+    sd x1,   0(sp)
+    sd x3,  16(sp)
+    sd x4,  24(sp)
+    sd x5,  32(sp)
+    SAVE_GPRS_X6_X30 sp
+    sd x31, 240(sp)
+
+    # Record the exact pre-trap sp in frame->sp.
+    addi t0, sp, 272
+    sd t0, 8(sp)
+
+    # Save interrupted sepc and sstatus into trap_frame.
+    csrr t0, sepc
+    sd t0, 248(sp)
+    csrr t0, sstatus
+    sd t0, 256(sp)
+
+    # s0 is preserved untouched so stacktrace::print() can unwind through the
+    # interrupted kernel frame.
+    mv a0, sp
     call kerneltrap
 
-    # restore registers.
-    ld ra, 0(sp)
-    # ld sp, 8(sp)
-    ld gp, 16(sp)
-    # not tp (contains hartid), in case we moved CPUs
-    ld t0, 32(sp)
-    ld t1, 40(sp)
-    ld t2, 48(sp)
-    ld a0, 72(sp)
-    ld a1, 80(sp)
-    ld a2, 88(sp)
-    ld a3, 96(sp)
-    ld a4, 104(sp)
-    ld a5, 112(sp)
-    ld a6, 120(sp)
-    ld a7, 128(sp)
-    ld t3, 216(sp)
-    ld t4, 224(sp)
-    ld t5, 232(sp)
-    ld t6, 240(sp)
+    # Restore sepc and sstatus from trap_frame: this thread may have been
+    # switched out during kerneltrap while other threads ran traps of their own.
+    ld t0, 248(sp)
+    ld t1, 256(sp)
+    csrw sepc, t0
+    csrw sstatus, t1
 
-    addi sp, sp, 256
+    # Restore x1, x3, x5..x31. Do NOT restore x2 (sp) or x4 (tp): tp holds this
+    # hart's cpuid, which may differ if this thread migrated across harts.
+    ld x1,   0(sp)
+    ld x3,  16(sp)
+    LOAD_GPRS_X5_X31 sp
 
-    # return to whatever we were doing in the kernel.
+    addi sp, sp, 272
     sret

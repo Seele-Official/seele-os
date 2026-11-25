@@ -13,7 +13,7 @@
 
 实现见 [process.h](../src/kernel/proc/process.h) 与 [process.cc](../src/kernel/proc/process.cc)。
 
-`process` 持有完整 `satp` 值、Sv39 根表物理地址 `pagetable` 及原子线程计数 `thread_count`；`thread` 指向所属 `process`，保存 `kernel_context`、`kstack { base, size }`（位于全局共享根项 508 窗口，同时供 [stacktrace.cc](../src/kernel/stacktrace.cc) 限定回溯范围）、预留用户 `trap_frame`、原子调度状态 `state`（`ThreadState`）、所属 hart 指针 `hart`（`cpu*`）与链表指针。
+`process` 持有完整 `satp` 值、Sv39 根表物理地址 `pagetable` 及原子线程计数 `thread_count`；`thread` 指向所属 `process`，保存 `kernel_context`、`kstack { base, size }`（位于全局共享根项 508 窗口，同时供 [stacktrace.cc](../src/kernel/stacktrace.cc) 限定回溯范围）、原子调度状态 `state`（`ThreadState`）、所属 hart 指针 `hart`（`cpu*`）与链表指针。`trap_frame` 不再内嵌在 `thread` 内，而是统一保存在当前线程的内核栈上。
 
 `proc::make_thread(owner, entry)` 必须在当前 hart 启用可访问共享堆与内核栈窗口的页表后调用：经 `vm::k::alloc_kernel_stack()` 分配全局唯一带 guard 页栈槽并分配线程对象，初始化 `ra = entry`、`sp = 槽顶`、`s0..s11 = 0`、`state = Created`、`hart = nullptr`。它仅创建线程，**不加入 `ready` 队列**（须经 `sched::enqueue()` 绑定至当前 hart 并入队）；线程入口不返回。栈窗口与 guard 页布局见 [memory.md](memory.md) 与 [vm.h](../src/kernel/mm/vm.h)。
 
@@ -36,14 +36,16 @@
 2. 若 `from->proc != to->proc`，将 `to->proc->satp` 写入 `satp`，前后各执行一次 `sfence.vma`；同进程切换跳过 `satp` 写入与 TLB 刷新。
 3. 恢复 `to->context` 寄存器并 `ret` 至其 `ra`（已有线程从调用点继续，新线程进入 `entry`）。
 
-`gp` 为内核全局指针、`tp` 存当前 hart 的 `cpuid`，二者不随线程切换；`switch_thread()` 不修改中断状态，也不保存/恢复浮点寄存器。
+`tp` 存当前 hart 的 `cpuid`，内核不使用 `gp`（链接启用 `--no-relax-gp`），二者均不随线程切换；`switch_thread()` 不修改中断状态，也不保存/恢复浮点寄存器。
 
 ## Trap 入口与分发
 
-入口与接口见 [tvec.S](../src/kernel/tvec.S)、[trap.h](../src/kernel/trap.h) 与 [trap.cc](../src/kernel/trap.cc)。`idle()` 将页对齐的 `tvec` 装入 `stvec`（direct 模式），以 `sscratch` 区分来源：
+入口与接口见 [tvec.S](../src/kernel/tvec.S)、[trap.h](../src/kernel/trap.h)、[trap.cc](../src/kernel/trap.cc) 与 [hart.h](../src/kernel/hart.h)。每个 hart 在 [kmain.cc](../src/kernel/kmain.cc) 初始化 `cpu::trap_scratch.kernel_tp = cpuid()`，`idle()` 先清零 `sscratch` 再将页对齐的 `tvec` 装入 `stvec`（direct 模式）。
 
-- **内核路径（`sscratch == 0`）**：在当前线程栈开辟 256 字节帧保存 caller-saved 寄存器及 `gp`，调用 `kerneltrap()` 后恢复并 `sret`。
-- **预留用户路径（`sscratch != 0`）**：`sscratch` 指向 `trap_frame`，保存 `x1..x31`、`sepc` 与 `sstatus` 后切入内核栈。当前无构造用户帧或进入用户态的路径，`usertrap()` 仅记录日志与转发外部中断。
+内核与用户路径共享统一的栈上 272 字节（16 字节对齐）`trap::trap_frame`（含 `x1..x31`、`sepc`、`sstatus` 与对齐填充），并以 `sscratch` 区分来源：
+
+- **内核路径（`sscratch == 0`）**：在当前线程内核栈分配 272 字节 `trap_frame`，保存 `x1..x31`（其中 `frame->sp` 为陷入前的原 `sp`）、`sepc` 与 `sstatus`，保持 `s0` 不变以支持帧指针回溯；调用 `kerneltrap(trap_frame*)` 返回后由汇编从 `trap_frame` 恢复 `sepc`、`sstatus` 与 `x1, x3, x5..x31`（不恢复 `sp` 与 `tp`），回收栈帧并 `sret`。
+- **预留用户路径（`sscratch != 0`）**：`sscratch` 指向本 hart 的 24 字节 `trap::trap_scratch`（`kernel_sp`、`kernel_tp`、`user_sp_tmp`）。陷入时暂存用户 `sp` 至 `user_sp_tmp`，切至 `kernel_sp` 并在内核栈分配 272 字节 `trap_frame`，保存全部用户 `x1..x31`、`sepc` 与 `sstatus` 同时清零 `sscratch`（此后嵌套 trap 走内核路径）；再恢复内核 `tp`（`kernel_tp`）、清零 `s0` 截断跨特权级回溯，调用 `usertrap(trap_frame*)`。`usertrap()` 在关中断状态下返回当前 hart 的 `trap_scratch*`，直接落入 `tvecret` 写回 `kernel_sp`、恢复 `sepc`/`sstatus`、重装 `sscratch`、恢复全部用户寄存器（最后恢复 `sp`）并 `sret`。首次进入用户态的入口为 `trap::enter_user(frame, scratch)`（经 `tvecret` 切入用户态）。当前无构造用户地址空间或进入用户态的路径，`usertrap()` 仅记录日志并转发外部中断。
 
 ### `kerneltrap()` 分发
 
@@ -53,7 +55,7 @@
 | `EXT_INT`      | 调用已安装控制器的 `handle()`，随后 `sched::schedule()`    |
 | 其他异常或中断 | 打印 `cause`、`sepc`、`stval`、`sstatus` 与调用栈后 panic  |
 
-定时器间隔固定为 1,000,000 个 time tick（未按 `timebase_frequency` 换算；10 MHz 下为 100 ms）。`kerneltrap()` 将 `sepc` 与 `sstatus` 保存在本线程栈的局部变量中并在返回前写回，保证跨线程切换后各线程 `sret` 恢复自身现场。常规时钟与外部中断不输出日志。
+定时器间隔固定为 1,000,000 个 time tick（未按 `timebase_frequency` 换算；10 MHz 下为 100 ms）。`sepc` 与 `sstatus` 由 `tvec.S` 统一保存并恢复于当前线程内核栈上的 `trap_frame`，保证跨线程切换后各线程 `sret` 恢复自身现场。常规时钟与外部中断不输出日志。
 
 ## 调度与等待契约
 
@@ -85,4 +87,4 @@
 - 初始线程集在启动期固定，全部运行于内核态；无运行时并发创建、线程退出、wait 或槽位/资源回收。
 - 无时间片记账、优先级、负载均衡、线程迁移或跨 hart 唤醒 IPI（`wake()` 已支持跨 hart 入队至目标 hart 的 `ready`，但不会主动打断远端 `idle` 的 `wfi()`）。
 - `start()` 将 `mstatus.FS` 置为 Initial，但上下文切换不保存/恢复浮点寄存器。
-- 未处理异常直接 panic 停机（诊断见 [debug.md](debug.md)）；修改 trap frame 须同步更新 `trap.h`、`tvec.S` 与布局断言。
+- 未处理异常直接 panic 停机（诊断见 [debug.md](debug.md)）；修改 `trap_frame` / `trap_scratch` 须同步更新 `trap.h`、`tvec.S` 与布局断言。

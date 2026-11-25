@@ -69,13 +69,7 @@ SECTIONS {
   . = ALIGN(4096);
   .data : {
     __data_start = .;
-    *(.data .data.*)
-    /* Small data is addressed relative to gp with a signed 12-bit offset when
-       the linker can relax it, so .sdata has to stay within 2 KiB of the
-       pointer. Keep it at the end of .data, right after __global_pointer$. */
-    . = ALIGN(8);
-    __global_pointer$ = . + 0x800;
-    *(.sdata .sdata.*)
+    *(.data .data.*) *(.sdata .sdata.*)
     __data_end = .;
   } :data
 

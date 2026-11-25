@@ -83,23 +83,22 @@ void warn_unhandled_source(uint32_t irq) noexcept {
 // receive interrupt wakes a reader parked in console::read() -- so it schedules
 // too. Exceptions never schedule.
 
-// Traps that arrived from user mode: tvec.S's sscratch path, which saved the
-// interrupted registers (x1..x31, sepc, sstatus) in the trap_frame and switched
-// to the kernel stack. The handler receives that frame in a0 and returns the
-// frame to resume: tvec.S stores it back into sscratch and restores the
-// registers and the CSRs from it. Once this path calls the scheduler
-// (switch_thread, sched/switch.h), that returned frame may belong to another
-// thread, which is how a trap becomes a thread switch.
-extern "C" trap_frame* usertrap(trap_frame* frame) {
-    uint64_t cause = csrr(scause);
+// Traps that arrived from user mode: tvec.S's sscratch != 0 path, which
+// switched to this thread's kernel stack, built a 272-byte trap_frame there,
+// cleared sscratch, and restored kernel tp. The handler receives that frame
+// in a0 and returns the current hart's trap_scratch* (which may differ from
+// entry if scheduling migrated the thread); tvec.S falls through into tvecret
+// to update kernel_sp, arm sscratch, restore the frame, and sret.
+extern "C" trap_scratch* usertrap(trap_frame* frame) {
+    SEELE_ASSERT((frame->sstatus & csr::sstatus::SPP) == 0, "Not from user mode");
 
-    SEELE_ASSERT((csrr(sstatus) & csr::sstatus::SPP) == 0, "Not from user mode");
+    const uint64_t cause = csrr(scause);
 
     LOG_DEBUG("hart {} usertrap time = {:#x} pc = {:#x} status = {:#x} cause = {:#x}",
               cpuid(),
               csrr(time),
-              frame->u_epc,
-              frame->u_status,
+              frame->sepc,
+              frame->sstatus,
               cause);
 
     // A user-mode external interrupt is one of the current thread's sources,
@@ -108,27 +107,19 @@ extern "C" trap_frame* usertrap(trap_frame* frame) {
     if(cause == csr::scause::EXT_INT) {
         service_external();
     }
-    return frame;  // trapframe to resume
+
+    SEELE_ASSERT(!is_intr_on(), "usertrap returning with interrupts enabled");
+    return &mycpu()->trap_scratch;
 }
 
 // Traps taken while already in the kernel: tvec.S's sscratch == 0 path, which
-// saved the caller-saved registers on the current thread's kernel stack. The
-// trap path is the scheduling point regardless of which mode the trap came
-// from.
-extern "C" void kerneltrap() {
-    uint64_t pc = csrr(sepc);
-    uint64_t cause = csrr(scause);
+// saved the full trap_frame (x1..x31, sepc, sstatus) on the current thread's
+// kernel stack and restores sepc/sstatus from it on return, keeping each
+// thread's interrupted state intact across preemptive switches.
+extern "C" void kerneltrap(trap_frame* frame) {
+    SEELE_ASSERT((frame->sstatus & csr::sstatus::SPP) != 0, "Not from supervisor mode");
 
-    // sstatus is hart state, not thread state. A trap is a scheduling point, so
-    // this handler can hand the hart to another thread and not continue until
-    // that thread has gone through traps of its own -- every one of which
-    // rewrites SPP, SPIE and SIE. Keeping the interrupted value here and
-    // restoring it before the sret below is what makes the return resume the
-    // mode and interrupt state this trap interrupted, no matter how many
-    // switches happened in between (the same reason sepc is kept in `pc`).
-    const uint64_t status = csrr(sstatus);
-
-    SEELE_ASSERT(status & csr::sstatus::SPP, "Not from supervisor mode");
+    const uint64_t cause = csrr(scause);
 
     switch(cause) {
         case csr::scause::TIME_INT: {
@@ -162,19 +153,11 @@ extern "C" void kerneltrap() {
                 cpuid(),
                 kind,
                 cause,
-                pc,
+                frame->sepc,
                 tval,
-                status);
+                frame->sstatus);
         }
     }
-
-    // Restore sepc and sstatus, then let tvec.S's sret return. With sstatus back
-    // to the value trap entry left, SPIE holds the interrupted thread's SIE and
-    // SPP names the mode it came from, so sret restores interrupts and returns to
-    // supervisor mode. Writing the saved value also undoes whatever another
-    // thread's trap left in these fields while this one was switched out.
-    csrw(sepc, pc);
-    csrw(sstatus, status);
 }
 
 void set_external_controller(ExternalController& controller) noexcept {

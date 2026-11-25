@@ -18,8 +18,9 @@
 #
 # Only what the C ABI calls callee-saved is part of a thread context. a0 and a1
 # are caller-saved, so a resumed call sees them clobbered exactly as the ABI
-# allows. gp belongs to the kernel and tp to the hart, so neither is saved or
-# restored: the hart keeps its cpuid across a switch.
+# allows. The kernel does not use gp (--no-relax-gp), and tp belongs to the
+# hart, so neither is saved or restored: the hart keeps its cpuid across a
+# switch.
 #
 # The address space follows the thread. When the two threads belong to
 # different processes, the page table must change: load to->proc->satp

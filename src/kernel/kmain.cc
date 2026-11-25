@@ -75,6 +75,9 @@ static void free_boot_stack() noexcept {
               cpuid(),
               to_uint64(vaddr(__builtin_frame_address(0))));
 
+    // sscratch == 0 marks supervisor mode for tvec.S. Clear it defensively
+    // before installing stvec and enabling interrupts.
+    csrw(sscratch, 0);
     csrw(stimecmp, csrr(time) + 1000000);
     csrw(stvec, reinterpret_cast<uint64_t>(trap::tvec));
 
@@ -97,6 +100,7 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
     if(cpuid() == 0) {
         cxx_init();
         mycpu()->hartid = hartid;
+        mycpu()->trap_scratch.kernel_tp = cpuid();
 
         // Bind the firmware DTB, bring up the early console if available,
         // enumerate devices, and discover memory/hart topology.
@@ -148,6 +152,7 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
         // root page table and create this hart's idle thread in `kernel_proc()`.
         while(!g_started.load(std::memory_order_acquire)) {}
         mycpu()->hartid = hartid;
+        mycpu()->trap_scratch.kernel_tp = cpuid();
 
         vm::k::enable(vm::k::pagetable());
 

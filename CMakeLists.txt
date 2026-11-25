@@ -334,6 +334,9 @@ target_link_options(kernel PRIVATE
     -Wl,-T,${SEELE_LINKER_SCRIPT}
     -Wl,--gc-sections
     -Wl,--build-id=none
+    # Kernel does not initialize or rely on __global_pointer$; disable GP
+    # relaxation while keeping call/PC-relative relaxation enabled.
+    -Wl,--no-relax-gp
 )
 
 # The kernel's own C library. It is a separate static library so it can grow

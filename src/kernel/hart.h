@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "list.h"
+#include "trap.h"
 #include "concurrency/spinlock.h"
 #include "proc/process.h"
 
@@ -48,6 +49,11 @@ struct cpu {
     // current thread once it leaves the boot context; the scheduler updates it
     // on every switch.
     proc::thread* current = nullptr;
+
+    // Per-hart scratch area loaded into sscratch while executing in U-mode.
+    // `kernel_tp` is initialized once per hart in kmain(); `kernel_sp` is
+    // updated by tvecret before each return to U-mode.
+    trap::trap_scratch trap_scratch{};
 
     Spinlock lock{};
     IntrusiveList<proc::thread> ready{};

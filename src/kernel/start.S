@@ -21,11 +21,6 @@
     .globl _entry
     .type _entry,@function
 _entry:
-    .option push
-    .option norelax
-    la gp, __global_pointer$
-    .option pop
-
     bnez a0, .Lsecondary
 
     # Boot hart (hartid 0): cpuid 0, large stack.
