@@ -330,7 +330,7 @@ Tree::Tree(const void* blob) noexcept : m_base(static_cast<const std::byte*>(blo
     const auto struct_end = uint64_t{off_struct} + size_struct;
     const auto strings_end = uint64_t{off_strings} + size_strings;
     if(off_struct < HEADER_SIZE || off_strings < HEADER_SIZE || size_struct < 4 ||
-       size_strings < 1 || struct_end > total || strings_end > total) {
+       struct_end > total || strings_end > total) {
         return;
     }
 

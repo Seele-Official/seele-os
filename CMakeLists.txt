@@ -1,5 +1,68 @@
 cmake_minimum_required(VERSION 3.25)
 
+option(SEELE_HOST_TESTS "Build host-side unit tests with ASan and UBSan" OFF)
+
+if(SEELE_HOST_TESTS)
+    project(seele_os_host_tests
+        VERSION 0.1.0
+        LANGUAGES CXX
+    )
+
+    if(CMAKE_SYSTEM_PROCESSOR STREQUAL "riscv64")
+        message(FATAL_ERROR
+            "SEELE_HOST_TESTS builds native host tests; configure without the RISC-V toolchain file")
+    endif()
+
+    set(CMAKE_CXX_STANDARD 26)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    set(CMAKE_CXX_EXTENSIONS OFF)
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+    find_package(GTest CONFIG REQUIRED)
+    find_path(LIBFDT_INCLUDE_DIR NAMES libfdt.h REQUIRED)
+    find_library(LIBFDT_LIBRARY NAMES fdt REQUIRED)
+    include(GoogleTest)
+
+    add_executable(seele_host_tests
+        src/kernel/fdt/fdt.cc
+        src/tests/host/panic_stub.cc
+        src/tests/host/addr_test.cc
+        src/tests/host/fdt_test.cc
+        src/tests/host/format_and_device_test.cc
+        src/tests/host/list_test.cc
+    )
+    target_include_directories(seele_host_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/kernel"
+    )
+    target_include_directories(seele_host_tests SYSTEM PRIVATE
+        "${LIBFDT_INCLUDE_DIR}"
+    )
+    target_compile_definitions(seele_host_tests PRIVATE
+        SEELE_FDT_MAX_DEPTH=32
+    )
+    target_compile_options(seele_host_tests PRIVATE
+        -O1
+        -g
+        -fno-omit-frame-pointer
+        -fsanitize=address,undefined
+        -fno-sanitize-recover=all
+        -Wall
+        -Wextra
+        -Wpedantic
+    )
+    target_link_options(seele_host_tests PRIVATE
+        -fsanitize=address,undefined
+    )
+    target_link_libraries(seele_host_tests PRIVATE
+        GTest::gtest_main
+        "${LIBFDT_LIBRARY}"
+    )
+
+    enable_testing()
+    gtest_discover_tests(seele_host_tests)
+    return()
+endif()
+
 project(seele_os
     VERSION 0.1.0
     LANGUAGES CXX ASM

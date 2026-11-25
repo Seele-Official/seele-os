@@ -33,13 +33,15 @@ seele>
 
 ### 常用命令
 
-| 目的                   | 命令                           |
-| ---------------------- | ------------------------------ |
-| 仅构建内核             | `pixi run build`               |
-| 运行内核自检（4 hart） | `pixi run test`                |
-| 4 hart 启动 QEMU       | `pixi run qemu 4`              |
-| 指定构建目录启动       | `pixi run qemu 1 build-alt`    |
-| 配置 Debug 构建        | 见 [构建与运行](docs/build.md) |
+| 目的                           | 命令                           |
+| ------------------------------ | ------------------------------ |
+| 仅构建内核                     | `pixi run build`               |
+| 运行全部测试（宿主机 + 内核）  | `pixi run test`                |
+| 仅运行宿主机单测（ASan/UBSan） | `pixi run test-host`           |
+| 仅运行内核自检（4 hart QEMU）  | `pixi run test-kernel`         |
+| 4 hart 启动 QEMU               | `pixi run qemu 4`              |
+| 指定构建目录启动               | `pixi run qemu 1 build-alt`    |
+| 配置 Debug 构建                | 见 [构建与运行](docs/build.md) |
 
 `qemu` 参数顺序为 `[harts] [buildDir]`（默认 `1 build`），默认使用 Release preset、QEMU `virt`、128 MiB RAM、`-bios none` 及 1 MiB virtio-blk 测试盘。
 

@@ -21,57 +21,46 @@ qemu = "==8.2.0"
 # (built from the separate seele-toolchain repo).
 riscv64-unknown-elf-gcc = "==16.2.0"
 riscv64-unknown-elf-libstdcxx = "==16.2.0"
+gtest = ">=1.18.0,<2"
+libfdt = ">=1.7.2,<2"
 
 [tasks]
 setup = "pnpm install"
 format = "pre-commit run --all-files"
+disk = { cmd = "pnpm run disk --build-dir '{{ buildDir }}'", args = [{ arg = "buildDir", default = "build" }], description = "Create the 1 MiB virtio test disk in buildDir." }
+clean = { cmd = "cmake -E rm -rf '{{ buildDir }}'", args = [{ arg = "buildDir", default = "build" }], description = "Remove buildDir (default: build)." }
+test = { depends-on = ["test-host", "test-kernel"], description = "Run all test suites (host unit tests and in-kernel KTest)." }
 
-# buildDir is relative to the workspace root and defaults to "build". The
-# parameterized tasks take it as a pixi argument, e.g. `pixi run build build-debug`.
+# buildDir is relative to the workspace root and defaults to "build".
+# configure / build accept positional [buildDir] [preset] (default: build, qemu-virt).
 [tasks.configure]
-cmd = "test -f '{{ buildDir }}/CMakeCache.txt' || cmake --preset qemu-virt -B '{{ buildDir }}'"
-args = [{ arg = "buildDir", default = "build" }]
-description = "Configure CMake in buildDir unless that directory is already configured."
+cmd = "test -f '{{ buildDir }}/CMakeCache.txt' || cmake --preset '{{ preset }}' -B '{{ buildDir }}'"
+args = [{ arg = "buildDir", default = "build" }, { arg = "preset", default = "qemu-virt" }]
+description = "Configure CMake in buildDir unless already configured."
 
 [tasks.build]
 cmd = "cmake --build '{{ buildDir }}'"
-depends-on = [{ task = "configure", args = ["{{ buildDir }}"] }]
-args = [{ arg = "buildDir", default = "build" }]
-description = "Build kernel.elf in buildDir."
-
-[tasks.disk]
-cmd = "pnpm run disk --build-dir '{{ buildDir }}'"
-args = [{ arg = "buildDir", default = "build" }]
-description = "Create the 1 MiB virtio test disk in buildDir."
+depends-on = [{ task = "configure", args = ["{{ buildDir }}", "{{ preset }}"] }]
+args = [{ arg = "buildDir", default = "build" }, { arg = "preset", default = "qemu-virt" }]
+description = "Build buildDir with preset (default: build, qemu-virt)."
 
 # pixi matches qemu arguments positionally: [harts] [buildDir].
 [tasks.qemu]
 cmd = "pnpm run qemu --build-dir '{{ buildDir }}' --harts '{{ harts }}'"
 depends-on = [
     "setup",
-    { task = "build", args = ["{{ buildDir }}"] },
+    { task = "build", args = ["{{ buildDir }}", "qemu-virt"] },
     { task = "disk", args = ["{{ buildDir }}"] },
 ]
 args = [{ arg = "harts", default = "1" }, { arg = "buildDir", default = "build" }]
 description = "Boot kernel.elf from buildDir with harts CPUs (default: 1 hart, build)."
 
-[tasks.configure-test]
-cmd = "test -f '{{ buildDir }}/CMakeCache.txt' || cmake --preset qemu-virt-test -B '{{ buildDir }}'"
-args = [{ arg = "buildDir", default = "build-test" }]
-description = "Configure the test-enabled kernel build in buildDir (default: build-test)."
-
-[tasks.build-test]
-cmd = "cmake --build '{{ buildDir }}'"
-depends-on = [{ task = "configure-test", args = ["{{ buildDir }}"] }]
-args = [{ arg = "buildDir", default = "build-test" }]
-description = "Build the test-enabled kernel.elf in buildDir (default: build-test)."
-
-# pixi matches test arguments positionally: [harts] [filter] [buildDir].
-[tasks.test]
+# pixi matches test-kernel arguments positionally: [harts] [filter] [buildDir].
+[tasks.test-kernel]
 cmd = "pnpm run test --build-dir '{{ buildDir }}' --harts '{{ harts }}' --filter '{{ filter }}'"
 depends-on = [
     "setup",
-    { task = "build-test", args = ["{{ buildDir }}"] },
+    { task = "build", args = ["{{ buildDir }}", "qemu-virt-test"] },
     { task = "disk", args = ["{{ buildDir }}"] },
 ]
 args = [
@@ -81,7 +70,12 @@ args = [
 ]
 description = "Build and run in-kernel KTest suites in QEMU (default: 4 harts, all, build-test)."
 
-[tasks.clean]
-cmd = "cmake -E rm -rf '{{ buildDir }}'"
-args = [{ arg = "buildDir", default = "build" }]
-description = "Remove buildDir (default: build)."
+# pixi matches test-host arguments positionally: [filter] [buildDir].
+[tasks.test-host]
+cmd = "'{{ buildDir }}/seele_host_tests' --gtest_filter='{{ filter }}'"
+depends-on = [{ task = "build", args = ["{{ buildDir }}", "host-test"] }]
+args = [
+    { arg = "filter", default = "*" },
+    { arg = "buildDir", default = "build-host" },
+]
+description = "Build and run GoogleTest host unit tests with ASan/UBSan (default: *, build-host)."

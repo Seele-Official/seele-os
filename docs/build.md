@@ -35,19 +35,22 @@ pixi install
 以下命令均在仓库根目录执行：
 
 ```bash
-pixi run build                    # 配置并构建 build/kernel.elf
-pixi run qemu                     # 构建、生成磁盘并启动：1 hart，build/
-pixi run qemu 4                   # 4 hart 启动
-pixi run qemu 1 build-alt         # 使用指定构建目录
-pixi run test                     # 构建 build-test/ 并在 4 hart QEMU 下运行全部 KTest 用例
-pixi run test 1 mm                # 1 hart 仅运行 mm 测试套件
-pixi run disk                     # 单独重建 build/disk.img
+pixi run build                     # 配置并构建 build/kernel.elf
+pixi run qemu                      # 构建、生成磁盘并启动：1 hart，build/
+pixi run qemu 4                    # 4 hart 启动
+pixi run qemu 1 build-alt          # 使用指定构建目录
+pixi run test                      # 运行全部测试（先 test-host，再 test-kernel）
+pixi run test-host                 # 构建 build-host/ 并运行带 ASan/UBSan 的 GoogleTest 宿主机单测
+pixi run test-host 'FdtTest.*'     # 按 gtest 过滤器仅运行 FdtTest 套件
+pixi run test-kernel               # 构建 build-test/ 并在 4 hart QEMU 下运行全部 KTest 用例
+pixi run test-kernel 1 mm          # 1 hart 仅运行 mm 测试套件
+pixi run disk                      # 单独重建 build/disk.img
 ```
 
-- `configure`、`build`、`disk`、`clean` 接受可选参数 `[buildDir]`（默认 `build`）；`configure-test` 与 `build-test` 默认使用 `build-test`（套用 `qemu-virt-test` preset：Debug + `SEELE_TESTS=ON`）。
-- `qemu` 接受位置参数 `[harts] [buildDir]`（默认 `1 build`）；`test` 接受位置参数 `[harts] [filter] [buildDir]`（默认 `4 all build-test`）。超过 `SEELE_MAX_HARTS` 的 hart 会在入口停机。
-- `configure` 与 `configure-test` 仅在目标目录缺少 `CMakeCache.txt` 时套用对应 preset；修改已有配置需显式调用 `pixi run cmake`。
-- `qemu` 与 `test` 会自动执行 `setup`、对应构建任务与 `disk`。`disk` 会覆盖目标 `disk.img`，请勿存放持久化数据。
+- `configure` 与 `build` 接受位置参数 `[buildDir] [preset]`（默认 `build qemu-virt`），可按需传入 `qemu-virt-test` 或 `host-test` preset（例如 `pixi run build build-host host-test`）；`disk`、`clean` 接受可选参数 `[buildDir]`（默认 `build`）。
+- `test` 汇总执行 `test-host` 与 `test-kernel`；单独执行时：`qemu` 接受 `[harts] [buildDir]`（默认 `1 build`），`test-kernel` 接受 `[harts] [filter] [buildDir]`（默认 `4 all build-test`），`test-host` 接受 `[filter] [buildDir]`（默认 `* build-host`，透传为 `--gtest_filter`）。超过 `SEELE_MAX_HARTS` 的 hart 会在入口停机。
+- `configure` 仅在目标目录缺少 `CMakeCache.txt` 时套用对应 preset；修改已有配置需显式调用 `pixi run cmake`。
+- `qemu` 与 `test-kernel` 会自动执行 `setup`、`build` 与 `disk`。`disk` 会覆盖目标 `disk.img`，请勿存放持久化数据。
 - `pixi run clean <buildDir>` 递归删除目标目录，执行前须确认路径。
 
 | 工具           | 职责                                                        | 入口                                                                           |

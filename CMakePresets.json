@@ -30,6 +30,17 @@
                 "CMAKE_BUILD_TYPE": "Debug",
                 "SEELE_TESTS": "ON"
             }
+        },
+        {
+            "name": "host-test",
+            "displayName": "Host x86-64 Unit Tests (ASan + UBSan)",
+            "description": "Native host unit tests for hardware-independent kernel modules",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-host",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SEELE_HOST_TESTS": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -40,6 +51,10 @@
         {
             "name": "qemu-virt-test",
             "configurePreset": "qemu-virt-test"
+        },
+        {
+            "name": "host-test",
+            "configurePreset": "host-test"
         }
     ]
 }

@@ -62,49 +62,49 @@ struct gpr_register {
 
 namespace registers {
 
-#define Reg(name) constexpr csr_register<StaticString{#name}> name
-#define Gpr(name) constexpr gpr_register<StaticString{#name}> name
+#define CSR(name) constexpr csr_register<StaticString{#name}> name
+#define GPR(name) constexpr gpr_register<StaticString{#name}> name
 
 // M-mode CSRs, programmed by start() before it mrets into S-mode.
-Reg(mstatus);
-Reg(medeleg);
-Reg(mideleg);
-Reg(mepc);
-Reg(mcounteren);
-Reg(menvcfg);
+CSR(mstatus);
+CSR(medeleg);
+CSR(mideleg);
+CSR(mepc);
+CSR(mcounteren);
+CSR(menvcfg);
 
-Reg(pmpcfg0);
-Reg(pmpaddr0);
+CSR(pmpcfg0);
+CSR(pmpaddr0);
 
 // S-mode CSRs.
-Reg(sstatus);
-Reg(satp);
-Reg(sie);
+CSR(sstatus);
+CSR(satp);
+CSR(sie);
 
 // S-mode trap CSRs.
 //
 // stvec: trap vector and mode; fields in csr::stvec.
-Reg(stvec);
+CSR(stvec);
 // sepc: the pc saved on trap entry. Bit 0 always reads as zero.
-Reg(sepc);
+CSR(sepc);
 // scause: the trap cause; fields in csr::scause.
-Reg(scause);
+CSR(scause);
 // stval: cause-specific trap value: the faulting address for the memory
 // exceptions, the offending instruction bits for an illegal instruction, and
 // so on.
-Reg(stval);
+CSR(stval);
 
-Reg(sscratch);
+CSR(sscratch);
 
-Reg(stimecmp);
+CSR(stimecmp);
 
-Reg(time);
+CSR(time);
 
 // tp is a GPR (thread pointer), not a CSR: only read()/write() accept it.
-Gpr(tp);
+GPR(tp);
 
-#undef Gpr
-#undef Reg
+#undef GPR
+#undef CSR
 
 }  // namespace registers
 
@@ -260,6 +260,8 @@ constexpr uint64_t PPN_MASK = (0b1ull << 44) - 1;
 
 }  // namespace csr
 
+#ifdef __riscv
+
 // CSR access instructions (Zicsr).
 //
 // Each instruction reads the old CSR value, then writes a new one, sets bits,
@@ -408,6 +410,8 @@ inline void fence_i() noexcept {
 inline void sfence_vma() noexcept {
     asm volatile("sfence.vma" : : : "memory");
 }
+
+#endif  // __riscv
 
 // mret and sret are deliberately not wrapped as functions. They do not return
 // in the C sense: the instruction after them runs in the target privilege mode

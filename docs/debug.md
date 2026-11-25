@@ -57,11 +57,18 @@ pixi run riscv64-unknown-elf-addr2line -f -C -i -e build/kernel.elf 0x8000019a
 
 ## 内核态自检（KTest）
 
-当 CMake 开启 `SEELE_TESTS=ON`（如 `qemu-virt-test` preset，对应 `pixi run test`）时，内核编译接入 [ktest.h](../src/kernel/test/ktest.h) / [ktest.cc](../src/kernel/test/ktest.cc) 及 [src/kernel/test/](../src/kernel/test/) 下的测试套件；默认构建不编译测试目标，`.ktest_cases` 段为空。
+当 CMake 开启 `SEELE_TESTS=ON`（如 `qemu-virt-test` preset，对应 `pixi run test-kernel`，也包含在 `pixi run test` 中）时，内核编译接入 [ktest.h](../src/kernel/test/ktest.h) / [ktest.cc](../src/kernel/test/ktest.cc) 及 [src/kernel/test/](../src/kernel/test/) 下的测试套件；默认构建不编译测试目标，`.ktest_cases` 段为空。
 
 - **静态发现**：`KTEST_CASE(suite, name)` 与 `KTEST_SMP_CASE(suite, name)` 将 16 字节对齐的描述符放入 [linker.ld](../src/kernel/linker.ld) `.rodata` 内的 `.ktest_cases` 区间，无堆分配与静态构造函数。
 - **执行与多核协同**：boot hart 运行 `ktest::runner_entry()`，secondary hart 各自运行 `ktest::worker_entry()` 并通过调度器两阶段睡眠原语休眠等待。单核用例仅在 boot hart 执行；`KTEST_SMP_CASE` 唤醒全部在线 worker 并在起始栅栏对齐后并发执行（阶段间可通过 `ktest::barrier()` 同步）。断言宏默认作用于当前活跃 `ktest::current()` 上下文，无需手动传递参数；每条用例结束后均断言本 hart 中断开启且 `interrupt_depth == 0`。
 - **过滤与退出**：支持经 `/chosen/bootargs` 传入 `test=<suite>`、`test=<suite>.<name>` 或 `test=all`（无匹配项视为失败）；运行完毕打印汇总并调用 `power::poweroff()` 返回退出码 `0`（全过）或 `1`（存在 `KTEST_EXPECT*` / `KTEST_ASSERT*` 失败）。
+
+## 宿主机纯逻辑单测（Host Tests）
+
+当 CMake 开启 `SEELE_HOST_TESTS=ON`（`host-test` preset，对应 `pixi run test-host`，也包含在 `pixi run test` 中）时，构建切换为基于 GoogleTest（`GTest::gtest_main`）的宿主机原生 C++26 测试可执行文件 `seele_host_tests`，启用 `-fsanitize=address,undefined -fno-sanitize-recover=all`（含 LeakSanitizer）。
+
+- **覆盖边界**：位于 [src/tests/host/](../src/tests/host/)，直接编译验证与硬件 CSR 解耦的内核源码（如 [addr.h](../src/kernel/mm/addr.h)、[heap.h](../src/kernel/mm/heap.h)、[format_spec.h](../src/kernel/format_spec.h)、[device_object.h](../src/kernel/device_object.h)、[list.h](../src/kernel/list.h) 以及 [fdt.cc](../src/kernel/fdt/fdt.cc) 的非对齐/截断/畸形 DTB 边界扫描）。
+- **死亡测试**：[panic_stub.cc](../src/tests/host/panic_stub.cc) 将内核 `panic` / `SEELE_ASSERT` 失败输出至 `stderr` 并调用 `std::abort()`，配合 GoogleTest 的 `EXPECT_DEATH` 在独立子进程中安全验证前置条件拒绝。
 
 ## 排查清单
 
