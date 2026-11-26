@@ -221,14 +221,25 @@ static_assert(to_uint64(kstack_slot_base(KSTACK_MAX_THREADS - 1)) - KSTACK_GUARD
                   to_uint64(KSTACK_WINDOW_BASE),
               "the lowest stack's guard page must stay inside the kstack window");
 
-// Contiguous low/high-start root entries copied into process root tables:
-// direct map (0..255) plus the seven heap arenas (256..262). Root entry 508
-// (the shared kernel-stack window) is also copied alongside this range.
-constexpr uint64_t KERNEL_LOW_ROOT_COUNT = PX<2>(heap_arena(HEAP_ARENA_COUNT));
-static_assert(KERNEL_LOW_ROOT_COUNT == 263,
-              "the contiguous kernel root prefix is the direct map plus seven heap arenas");
-static_assert(KERNEL_LOW_ROOT_COUNT <= KSTACK_ROOT_INDEX,
-              "the contiguous kernel root prefix must stay below the kstack root entry");
+// Sv39 root-table partition:
+//   - 0..127:   direct map (128 GiB, frozen and copied into every process root)
+//   - 128..255: private per-process user space (128 GiB, zero in kernel root)
+//   - 256..262: shared kernel heap arenas (7 GiB, frozen and copied)
+//   - 508:      shared kernel-stack window (1 GiB, frozen and copied)
+constexpr uint64_t DIRECT_MAP_ROOT_COUNT = PX<2>(P2V(DIRECT_MAP_END));
+constexpr uint64_t USER_ROOT_BEGIN = PX<2>(u::USER_BASE);
+constexpr uint64_t USER_ROOT_END = PX<2>(u::USER_TOP - 1) + 1;
+constexpr uint64_t HEAP_ROOT_BEGIN = PX<2>(heap_arena(0));
+constexpr uint64_t HEAP_ROOT_END = PX<2>(heap_arena(HEAP_ARENA_COUNT));
+
+static_assert(DIRECT_MAP_ROOT_COUNT == 128, "direct map must occupy root entries 0..127");
+static_assert(USER_ROOT_BEGIN == DIRECT_MAP_ROOT_COUNT,
+              "user space must start immediately above the direct map");
+static_assert(USER_ROOT_END == 256, "user space must end at the top of Sv39's low half");
+static_assert(HEAP_ROOT_BEGIN == 256, "heap arenas must start at root entry 256");
+static_assert(HEAP_ROOT_END == 263, "seven heap arenas occupy root entries 256..262");
+static_assert(HEAP_ROOT_END <= KSTACK_ROOT_INDEX,
+              "heap root entries must stay below the kstack root entry");
 
 static_assert(to_uint64(HEAP_BASE) == 0xffff'ffc0'0000'0000ull,
               "the heap window must start at the bottom of Sv39's high half");
@@ -240,6 +251,11 @@ static_assert(PX<2>(heap_arena(HEAP_ARENA_COUNT - 1)) ==
               "the heap arenas must be consecutive Sv39 level-2 entries");
 static_assert(heap_arena(HEAP_ARENA_COUNT) <= KSTACK_WINDOW_BASE,
               "the heap window must stay below the kstack window");
+static_assert(u::USER_BASE == P2V(DIRECT_MAP_END), "user space must begin at DIRECT_MAP_END");
+static_assert(to_uint64(u::USER_STACK_TOP) % 16 == 0,
+              "initial user stack pointer must preserve 16-byte psABI alignment");
+static_assert(u::USER_LOAD_LIMIT > u::USER_BASE && u::USER_STACK_BASE < u::USER_STACK_TOP,
+              "user load region and user stack must be non-empty");
 
 // Intrusive free list + high-water mark for guarded kernel-stack slots.
 // Freed slots thread their link into the lowest mapped bytes of the stack
@@ -419,7 +435,13 @@ void init(const platform::MemoryMap& memory, std::span<const device::Device> dev
 
     // Reserve empty level-1 tables for all seven heap arenas (256..262) and for
     // the shared kernel-stack window (508) so every shared root entry is final
-    // when init() returns.
+    // when init() returns. Root entries 128..255 stay empty for per-process
+    // user mappings.
+    for(uint64_t index = USER_ROOT_BEGIN; index < USER_ROOT_END; ++index) {
+        SEELE_ASSERT(((*g_kernel_pagetable)[index] & riscv::PTE_V) == 0,
+                     "vm: user root entry {} is unexpectedly occupied by the direct map",
+                     index);
+    }
     for(uint64_t index = 0; index < HEAP_ARENA_COUNT; ++index) {
         SEELE_ASSERT(((*g_kernel_pagetable)[PX<2>(heap_arena(index))] & riscv::PTE_V) == 0,
                      "vm: the direct map already uses heap arena {}",
@@ -473,7 +495,10 @@ Paddr create_process_pagetable() noexcept {
     riscv::PageTable* root = PA2PT(root_pa);
     memset(root, 0, riscv::PGSIZE);
 
-    for(uint64_t index = 0; index < KERNEL_LOW_ROOT_COUNT; ++index) {
+    for(uint64_t index = 0; index < DIRECT_MAP_ROOT_COUNT; ++index) {
+        copy_frozen_root_entry(root, index);
+    }
+    for(uint64_t index = HEAP_ROOT_BEGIN; index < HEAP_ROOT_END; ++index) {
         copy_frozen_root_entry(root, index);
     }
     copy_frozen_root_entry(root, KSTACK_ROOT_INDEX);
@@ -582,5 +607,160 @@ bool mappages(Vaddr va, uint64_t size, Paddr pa) noexcept {
 }
 
 }  // namespace k
+
+namespace u {
+namespace {
+
+constexpr uint64_t USER_ROOT_BEGIN = PX<2>(USER_BASE);
+constexpr uint64_t USER_ROOT_END = PX<2>(USER_TOP - 1) + 1;
+constexpr uint64_t PTE_RWX = riscv::PTE_R | riscv::PTE_W | riscv::PTE_X;
+
+void require_process_root(Paddr root_pa, const char* caller) noexcept {
+    SEELE_ASSERT(!is_null(root_pa) && is_page_aligned(root_pa) &&
+                     range_contains(k::DIRECT_MAP_BASE, k::DIRECT_MAP_END, root_pa),
+                 "{}: invalid root pagetable {:#x}",
+                 caller,
+                 to_uint64(root_pa));
+    SEELE_ASSERT(root_pa != k::pagetable(),
+                 "{}: must not mutate the shared kernel pagetable",
+                 caller);
+}
+
+}  // namespace
+
+bool map_user_pages(Paddr root_pa, Vaddr va, uint64_t size, Paddr pa, uint64_t perm) noexcept {
+    require_process_root(root_pa, "vm::u::map_user_pages");
+    SEELE_ASSERT(size != 0 && is_user_range(va, size),
+                 "vm::u::map_user_pages: [{:#018x}, +{:#x}) is outside user space",
+                 to_uint64(va),
+                 size);
+    return vm::mappages(PA2PT(root_pa), va, size, pa, perm | riscv::PTE_U);
+}
+
+std::optional<Paddr> translate_user(Paddr root_pa, Vaddr va, uint64_t required_perm) noexcept {
+    if(!range_contains(USER_BASE, USER_TOP, va)) {
+        return std::nullopt;
+    }
+    const riscv::PageTableEntry* const pte = walk<false>(PA2PT(root_pa), va);
+    if(pte == nullptr) {
+        return std::nullopt;
+    }
+    const uint64_t needed = riscv::PTE_V | riscv::PTE_U | required_perm;
+    if((*pte & needed) != needed) {
+        return std::nullopt;
+    }
+    return PTE2PA(*pte) + (to_uint64(va) & riscv::PGOFFSET_MASK);
+}
+
+bool check_user_range(Paddr root_pa, Vaddr va, size_t size, uint64_t required_perm) noexcept {
+    if(!is_user_range(va, size)) {
+        return false;
+    }
+    size_t done = 0;
+    while(done < size) {
+        const Vaddr cur = va + done;
+        if(!translate_user(root_pa, cur, required_perm).has_value()) {
+            return false;
+        }
+        const uint64_t page_off = to_uint64(cur) & riscv::PGOFFSET_MASK;
+        const size_t step = riscv::PGSIZE - page_off;
+        done += (size - done < step) ? (size - done) : step;
+    }
+    return true;
+}
+
+bool copy_from_user(Paddr root_pa, void* dst, Vaddr src_va, size_t size) noexcept {
+    if(size == 0) {
+        return true;
+    }
+    if(dst == nullptr || !is_user_range(src_va, size)) {
+        return false;
+    }
+
+    auto* out = static_cast<std::byte*>(dst);
+    size_t done = 0;
+    while(done < size) {
+        const Vaddr cur = src_va + done;
+        const std::optional<Paddr> pa = translate_user(root_pa, cur, riscv::PTE_R);
+        if(!pa.has_value()) {
+            return false;
+        }
+        const uint64_t page_off = to_uint64(cur) & riscv::PGOFFSET_MASK;
+        const size_t avail = riscv::PGSIZE - page_off;
+        const size_t chunk = (size - done < avail) ? (size - done) : avail;
+        memcpy(out + done, to_pointer<const void>(k::P2V(*pa)), chunk);
+        done += chunk;
+    }
+    return true;
+}
+
+bool copy_to_user(Paddr root_pa, Vaddr dst_va, const void* src, size_t size) noexcept {
+    if(size == 0) {
+        return true;
+    }
+    if(src == nullptr || !is_user_range(dst_va, size)) {
+        return false;
+    }
+
+    const auto* in = static_cast<const std::byte*>(src);
+    size_t done = 0;
+    while(done < size) {
+        const Vaddr cur = dst_va + done;
+        const std::optional<Paddr> pa = translate_user(root_pa, cur, riscv::PTE_R | riscv::PTE_W);
+        if(!pa.has_value()) {
+            return false;
+        }
+        const uint64_t page_off = to_uint64(cur) & riscv::PGOFFSET_MASK;
+        const size_t avail = riscv::PGSIZE - page_off;
+        const size_t chunk = (size - done < avail) ? (size - done) : avail;
+        memcpy(to_pointer<void>(k::P2V(*pa)), in + done, chunk);
+        done += chunk;
+    }
+    return true;
+}
+
+void destroy_user_mappings(Paddr root_pa) noexcept {
+    require_process_root(root_pa, "vm::u::destroy_user_mappings");
+
+    riscv::PageTable* const root = PA2PT(root_pa);
+    constexpr size_t ENTRIES_PER_TABLE = riscv::PGSIZE / sizeof(riscv::PageTableEntry);
+
+    for(uint64_t l2 = USER_ROOT_BEGIN; l2 < USER_ROOT_END; ++l2) {
+        const riscv::PageTableEntry l2_pte = (*root)[l2];
+        if((l2_pte & riscv::PTE_V) == 0) {
+            continue;
+        }
+        SEELE_ASSERT((l2_pte & PTE_RWX) == 0,
+                     "vm::u::destroy_user_mappings: superpage at l2 {}",
+                     l2);
+        const Paddr l1_pa = PTE2PA(l2_pte);
+        riscv::PageTable* const l1_table = PA2PT(l1_pa);
+
+        for(size_t l1 = 0; l1 < ENTRIES_PER_TABLE; ++l1) {
+            const riscv::PageTableEntry l1_pte = (*l1_table)[l1];
+            if((l1_pte & riscv::PTE_V) == 0) {
+                continue;
+            }
+            SEELE_ASSERT((l1_pte & PTE_RWX) == 0,
+                         "vm::u::destroy_user_mappings: superpage at l1 {}",
+                         l1);
+            const Paddr l0_pa = PTE2PA(l1_pte);
+            riscv::PageTable* const l0_table = PA2PT(l0_pa);
+
+            for(size_t l0 = 0; l0 < ENTRIES_PER_TABLE; ++l0) {
+                const riscv::PageTableEntry leaf = (*l0_table)[l0];
+                if((leaf & riscv::PTE_V) == 0) {
+                    continue;
+                }
+                phymem::free(PTE2PA(leaf));
+            }
+            phymem::free(l0_pa);
+        }
+        phymem::free(l1_pa);
+        (*root)[l2] = 0;
+    }
+}
+
+}  // namespace u
 
 }  // namespace vm

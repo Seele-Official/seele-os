@@ -167,4 +167,40 @@ void wake(proc::thread* thread) noexcept {
     }
 }
 
+[[noreturn]] void exit_current() noexcept {
+    auto* cpu = mycpu();
+    SEELE_ASSERT(!is_intr_on(), "interruptible");
+    SEELE_ASSERT(cpu->interrupt_depth == 0, "spinlock");
+    auto* current = cpu->current;
+    SEELE_ASSERT(current != nullptr, "sched::exit_current() without a current thread");
+    SEELE_ASSERT(current != cpu->idle, "sched::exit_current() from the idle thread");
+    SEELE_ASSERT(current->hart.load(std::memory_order_relaxed) == cpu,
+                 "sched::exit_current(): current thread does not belong to this hart");
+
+    proc::thread* next = nullptr;
+    {
+        LockGuard guard{cpu->lock};
+
+        SEELE_ASSERT(current->state.load(std::memory_order_acquire) == proc::ThreadState::Running,
+                     "sched::exit_current(): current thread is not running (state={})",
+                     proc::thread_state_name(current->state.load(std::memory_order_relaxed)));
+
+        next = cpu->ready.pop_front();
+        SEELE_ASSERT(next != current, "sched::exit_current(): current thread was already ready");
+        if(next == nullptr) {
+            next = cpu->idle;
+        }
+        SEELE_ASSERT(next->state.load(std::memory_order_acquire) == proc::ThreadState::Ready,
+                     "sched::exit_current(): next thread is not ready (state={})",
+                     proc::thread_state_name(next->state.load(std::memory_order_relaxed)));
+
+        current->state.store(proc::ThreadState::Exited, std::memory_order_release);
+        next->state.store(proc::ThreadState::Running, std::memory_order_release);
+        cpu->current = next;
+    }
+
+    switch_thread(current, next);
+    SEELE_UNREACHABLE();
+}
+
 }  // namespace sched

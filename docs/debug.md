@@ -6,7 +6,7 @@
 
 [console.h](../src/kernel/console.h) 提供 `print()` / `println()` 与 `LOG_DEBUG`、`LOG_INFO`、`LOG_WARN`、`LOG_ERR`。日志无运行期级别过滤，Release 同样编译执行。
 
-- **格式检查与输出引擎**：核心格式化实现位于 [util/format.h](../src/kernel/util/format.h) / [util/format.cc](../src/kernel/util/format.cc)，提供 `format_to()` / `vformat_to()`（支持自定义 `FormatSink` 与定长 `std::span<char>` 缓冲区）。字面量格式串由 `consteval` 在编译期验证占位符数量、参数类型与格式说明符兼容性；运行期格式串经 `vformat_to()` / `vprint()` / `vprintln()` 解析，非法占位符按原文本输出。支持 `{{`/`}}` 转义、整数（`d`/`x`/`X`/`b`/`B`/`o`，含 `+`/`-`/` ` 符号、`#` 前缀与零填充）、`char`（默认/`c` 或整数进制）、`bool`、可转为 `std::string_view` 的字符串、无类型指针（`void*`/`const void*`/`nullptr`，默认/`p`/`P` 及零填充），以及通用填充字符、对齐（`<`/`>`/`^`）与最大 255 宽度。
+- **格式检查与输出引擎**：核心格式化实现位于共享模块 [src/util/format.h](../src/util/format.h) / [src/util/format.cc](../src/util/format.cc)（内核与用户态共用），提供 `format_to()` / `vformat_to()`（支持自定义 `FormatSink` 与定长 `std::span<char>` 缓冲区）。字面量格式串由 `consteval` 在编译期验证占位符数量、参数类型与格式说明符兼容性；运行期格式串经 `vformat_to()` / `vprint()` / `vprintln()` 解析，非法占位符按原文本输出。支持 `{{`/`}}` 转义、整数（`d`/`x`/`X`/`b`/`B`/`o`，含 `+`/`-`/` ` 符号、`#` 前缀与零填充）、`char`（默认/`c` 或整数进制）、`bool`、可转为 `std::string_view` 的字符串、无类型指针（`void*`/`const void*`/`nullptr`，默认/`p`/`P` 及零填充），以及通用填充字符、对齐（`<`/`>`/`^`）与最大 255 宽度。
 - **输出行为**：单次 `print()` / `println()` / `LOG_*` 在 console 锁内完成格式化，按 64 字节 staging 块写入 [`ConsoleSink::write()`](../src/kernel/char_device.h)，不会被其他正常写者打断；多次调用拼成的行不合并加锁。输出路径不调度，可用于启动代码、trap 与中断上下文（未挂接 sink 时丢弃）。队列背压与锁序细节见 [platform.md](platform.md)。
 
 ## Assert、Panic 与停机
@@ -67,7 +67,7 @@ pixi run riscv64-unknown-elf-addr2line -f -C -i -e build/kernel.elf 0x8000019a
 
 当 CMake 开启 `SEELE_HOST_TESTS=ON`（`host-test` preset，对应 `pixi run test-host`，也包含在 `pixi run test` 中）时，构建切换为基于 GoogleTest（`GTest::gtest_main`）的宿主机原生 C++26 测试可执行文件 `seele_host_tests`，启用 `-fsanitize=address,undefined -fno-sanitize-recover=all`（含 LeakSanitizer）。
 
-- **覆盖边界**：位于 [src/tests/host/](../src/tests/host/)，直接编译验证与硬件 CSR 解耦的内核源码（如 [addr.h](../src/kernel/mm/addr.h)、[heap.h](../src/kernel/mm/heap.h)、[util/format.h](../src/kernel/util/format.h) / [util/format.cc](../src/kernel/util/format.cc)、[device_object.h](../src/kernel/device_object.h)、[util/list.h](../src/kernel/util/list.h) 以及 [fdt.cc](../src/kernel/fdt/fdt.cc) 的非对齐/截断/畸形 DTB 边界扫描）。
+- **覆盖边界**：位于 [src/tests/host/](../src/tests/host/)，直接编译验证与硬件 CSR 解耦的内核与共享源码（如 [addr.h](../src/kernel/mm/addr.h)、[heap.h](../src/kernel/mm/heap.h)、[elf_format.cc](../src/kernel/proc/elf_format.cc)、[format.h](../src/util/format.h) / [format.cc](../src/util/format.cc)、[device_object.h](../src/kernel/device_object.h)、[list.h](../src/kernel/util/list.h) 以及 [fdt.cc](../src/kernel/fdt/fdt.cc) 的非对齐/截断/畸形 DTB 边界扫描）。
 - **死亡测试**：[panic_stub.cc](../src/tests/host/panic_stub.cc) 将内核 `panic` / `SEELE_ASSERT` 失败输出至 `stderr` 并调用 `std::abort()`，配合 GoogleTest 的 `EXPECT_DEATH` 在独立子进程中安全验证前置条件拒绝。
 
 ## 排查清单
@@ -82,6 +82,6 @@ pixi run riscv64-unknown-elf-addr2line -f -C -i -e build/kernel.elf 0x8000019a
 ## 当前边界
 
 - 无内核转储（不保存内存、CSR 或完整寄存器快照），现场依赖串口日志与对应 ELF。
-- 预留的用户态 `trap_frame` 路径尚未接入同等的异常回溯输出。
+- 用户态未处理异常当前由 `usertrap()` 输出 `cause`/`sepc`/`stval`/`sstatus` 错误日志并终止故障线程，尚无跨特权级用户栈回溯输出。
 - `kerneltrap()` 对未处理异常/未知中断直接打印 `cause`/`sepc`/`stval`/`sstatus` 并 panic，无恢复逻辑。
 - 日志无级别过滤与持久化；栈回溯上限 32 帧，仅覆盖符合帧指针约定的 C/C++ 栈帧。

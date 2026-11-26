@@ -6,6 +6,7 @@
 #include "hart.h"
 #include "panic.h"
 #include "riscv.h"
+#include "proc/syscall.h"
 #include "sched/schedule.h"
 
 using namespace riscv;
@@ -94,18 +95,45 @@ extern "C" trap_scratch* usertrap(trap_frame* frame) {
 
     const uint64_t cause = csrr(scause);
 
-    LOG_DEBUG("hart {} usertrap time = {:#x} pc = {:#x} status = {:#x} cause = {:#x}",
-              cpuid(),
-              csrr(time),
-              frame->sepc,
-              frame->sstatus,
-              cause);
+    switch(cause) {
+        case csr::scause::TIME_INT: {
+            csrw(stimecmp, csrr(time) + 1000000);
+            sched::schedule();
+            break;
+        }
+        case csr::scause::EXT_INT: {
+            service_external();
+            sched::schedule();
+            break;
+        }
+        case csr::scause::U_ECALL: {
+            // Advance sepc past the 4-byte `ecall` instruction before enabling
+            // interrupts so nested traps or preemption preserve the return PC.
+            frame->sepc += 4;
+            intr_on();
+            syscall::dispatch(frame);
+            intr_off();
+            break;
+        }
+        default: {
+            const uint64_t tval = csrr(stval);
+            const char* kind = (cause & csr::scause::INTERRUPT) != 0 ? "interrupt" : "exception";
+            LOG_ERR(
+                "hart {} unhandled user {}: cause={:#x} sepc={:#018x} stval={:#018x} sstatus={:#x}",
+                cpuid(),
+                kind,
+                cause,
+                frame->sepc,
+                tval,
+                frame->sstatus);
 
-    // A user-mode external interrupt is one of the current thread's sources,
-    // exactly like the kernel-side one below; the trap frame does not change
-    // what the controller has to do.
-    if(cause == csr::scause::EXT_INT) {
-        service_external();
+            proc::thread* const current = mycpu()->current;
+            if(current != nullptr) {
+                current->fault_cause.store(cause, std::memory_order_release);
+                current->exit_code.store(-1, std::memory_order_release);
+            }
+            sched::exit_current();
+        }
     }
 
     SEELE_ASSERT(!is_intr_on(), "usertrap returning with interrupts enabled");

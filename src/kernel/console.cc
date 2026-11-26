@@ -175,6 +175,16 @@ char read() noexcept {
     return device->read();
 }
 
+void write(std::string_view data) noexcept {
+    if(data.empty() || g_panicking.load(std::memory_order_acquire)) {
+        return;
+    }
+    LockGuard guard{g_lock};
+    if(ConsoleSink* sink = g_sink.load(std::memory_order_acquire); sink != nullptr) {
+        sink->write(data.data(), data.size());
+    }
+}
+
 void flush() noexcept {
     if(g_panicking.load(std::memory_order_acquire)) {
         return;

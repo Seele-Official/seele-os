@@ -148,17 +148,76 @@ KTEST_CASE(mm, kstack_slots_and_pagetable) {
     KTEST_EXPECT_EQ(*reused, *second);
     vm::k::free_kernel_stack(*reused);
 
-    // Process page tables clone frozen kernel root entries, including heap and
-    // the shared root-508 kernel-stack subtree.
+    // Process page tables clone frozen kernel root entries (direct map 0..127,
+    // heap 256..262, and shared root-508 kstack) while leaving user entries
+    // 128..255 private and zero-initialized.
     const Paddr proc_pt_pa = vm::k::create_process_pagetable();
     KTEST_ASSERT(!is_null(proc_pt_pa));
     KTEST_EXPECT_NE(proc_pt_pa, vm::k::pagetable());
     const auto* kernel_root = to_pointer<const riscv::PageTable>(vm::k::P2V(vm::k::pagetable()));
     const auto* proc_root = to_pointer<const riscv::PageTable>(vm::k::P2V(proc_pt_pa));
+    KTEST_EXPECT_EQ((*proc_root)[2], (*kernel_root)[2]);
+    KTEST_EXPECT_EQ((*proc_root)[128], uint64_t{0});
+    KTEST_EXPECT_EQ((*proc_root)[255], uint64_t{0});
     KTEST_EXPECT_EQ((*proc_root)[256], (*kernel_root)[256]);
     KTEST_EXPECT_EQ((*proc_root)[508], (*kernel_root)[508]);
     KTEST_EXPECT(((*proc_root)[508] & riscv::PTE_V) != 0);
     phymem::free(proc_pt_pa);
+}
+
+KTEST_CASE(mm, user_memory_copy) {
+    const Paddr pt = vm::k::create_process_pagetable();
+    KTEST_ASSERT(!is_null(pt));
+
+    const Paddr rw_page0 = phymem::alloc();
+    const Paddr rw_page1 = phymem::alloc();
+    const Paddr ro_page = phymem::alloc();
+    KTEST_ASSERT(!is_null(rw_page0));
+    KTEST_ASSERT(!is_null(rw_page1));
+    KTEST_ASSERT(!is_null(ro_page));
+    memset(to_pointer<void>(vm::k::P2V(rw_page0)), 0, riscv::PGSIZE);
+    memset(to_pointer<void>(vm::k::P2V(rw_page1)), 0, riscv::PGSIZE);
+    memset(to_pointer<void>(vm::k::P2V(ro_page)), 0x5a, riscv::PGSIZE);
+
+    const Vaddr base_va = vm::u::USER_BASE + 0x10000;
+    const Vaddr ro_va = vm::u::USER_BASE + 0x20000;
+    KTEST_ASSERT(
+        vm::u::map_user_pages(pt, base_va, riscv::PGSIZE, rw_page0, riscv::PTE_R | riscv::PTE_W));
+    KTEST_ASSERT(vm::u::map_user_pages(pt,
+                                       base_va + riscv::PGSIZE,
+                                       riscv::PGSIZE,
+                                       rw_page1,
+                                       riscv::PTE_R | riscv::PTE_W));
+    KTEST_ASSERT(vm::u::map_user_pages(pt, ro_va, riscv::PGSIZE, ro_page, riscv::PTE_R));
+
+    // Cross-page copy_to_user and copy_from_user.
+    char src[32]{};
+    for(size_t i = 0; i < sizeof(src); ++i) {
+        src[i] = static_cast<char>('A' + (i % 26));
+    }
+    const Vaddr cross_va = base_va + riscv::PGSIZE - 12;
+    KTEST_EXPECT(vm::u::copy_to_user(pt, cross_va, src, sizeof(src)));
+
+    char dst[32]{};
+    KTEST_EXPECT(vm::u::copy_from_user(pt, dst, cross_va, sizeof(dst)));
+    KTEST_EXPECT_EQ(memcmp(src, dst, sizeof(src)), 0);
+
+    // Read-only user page allows copy_from_user but rejects copy_to_user.
+    char ro_buf[8]{};
+    KTEST_EXPECT(vm::u::copy_from_user(pt, ro_buf, ro_va, sizeof(ro_buf)));
+    KTEST_EXPECT_EQ(ro_buf[0], static_cast<char>(0x5a));
+    KTEST_EXPECT(!vm::u::copy_to_user(pt, ro_va, src, sizeof(ro_buf)));
+
+    // Unmapped, kernel direct-map, high-half, and overflowing ranges are rejected.
+    KTEST_EXPECT(!vm::u::copy_from_user(pt, dst, vm::u::USER_BASE + 0x30000, 8));
+    KTEST_EXPECT(!vm::u::copy_from_user(pt, dst, vaddr(0x8000'0000ull), 8));
+    KTEST_EXPECT(!vm::u::copy_from_user(pt, dst, vm::k::HEAP_BASE, 8));
+    KTEST_EXPECT(!vm::u::copy_to_user(pt, vaddr(UINT64_MAX - 4), src, 16));
+
+    // Teardown frees all user leaf pages and private page-table levels cleanly.
+    vm::u::destroy_user_mappings(pt);
+    KTEST_EXPECT(!vm::u::translate_user(pt, base_va, riscv::PTE_R).has_value());
+    phymem::free(pt);
 }
 
 KTEST_SMP_CASE(mm, smp_allocators) {

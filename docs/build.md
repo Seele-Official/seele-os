@@ -75,7 +75,7 @@ pixi run qemu 1 build-debug
 
 [tools/lib/qemu.ts](../tools/lib/qemu.ts) 默认生成：`virt`、128 MiB RAM、`-bios none`、`-serial stdio -monitor none` 以及一块 1 MiB virtio-blk 测试盘（当前无块设备驱动，仅用于设备枚举），并支持按需附加 `-append`（写入 `/chosen/bootargs`）。[tools/cli.ts](../tools/cli.ts) 的 `test` 子命令额外提供看门狗超时保护（默认 30000 ms），超时仅终止本次启动的 QEMU 子进程并返回退出码 `124`。可通过环境变量 `SEELE_QEMU` 指定 QEMU 二进制路径。
 
-看到 `seele>` 提示符后，运行 `help`、`echo hello`、`info` 完成基线冒烟验证，随后执行 `poweroff` 即可经 `sifive_test` 关机设备正常退出 QEMU。由于串口未启用 multiplexer 且 `Ctrl-C` 仅取消当前输入行，若内核停机或 shell 无响应，可在另一终端确认本次启动的 `qemu-system-riscv64` PID 后执行 `kill -TERM <PID>`。
+看到 `seele>` 提示符后，运行 `help`、`echo hello` 完成基线冒烟验证，随后执行 `poweroff` 即可经 `shutdown` 系统调用与 `sifive_test` 关机设备正常退出 QEMU。由于串口未启用 multiplexer 且 `Ctrl-C` 仅取消当前输入行，若内核停机或 shell 无响应，可在另一终端确认本次启动的 `qemu-system-riscv64` PID 后执行 `kill -TERM <PID>`。
 
 ## 3. 构建参数
 
@@ -131,16 +131,20 @@ pixi run build
 
 ### 运行时符号归属
 
-| 符号/能力                                                                | 提供方与约束                                                                                       |
-| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| `.init_array` 边界与调用                                                 | [linker.ld](../src/kernel/linker.ld) 定义边界，[kmain.cc](../src/kernel/kmain.cc) 清 `.bss` 后执行 |
-| `std::nothrow`、纯虚/已删除虚函数失败入口、弱 `__cxx_panic`              | [src/cxx/runtime.cc](../src/cxx/runtime.cc)，失败转入 panic                                        |
-| `operator new/delete`                                                    | [heap.cc](../src/kernel/mm/heap.cc)，受堆大小类别与对齐限制（见 [memory.md](memory.md)）           |
-| `abort`                                                                  | [src/libc/stdlib.cc](../src/libc/stdlib.cc)，转入 panic                                            |
-| `memcpy/memmove/memset/memcmp/memchr`、`strlen/strcmp/strncmp`           | [src/libc/string.cc](../src/libc/string.cc)，声明于 [string.h](../src/libc/include/string.h)       |
-| `std::terminate` 系列、`malloc/free`、析构注册 (`atexit`/`__cxa_atexit`) | 未提供；避免引入带非平凡析构的静态对象                                                             |
+| 符号/能力                                                                | 提供方与约束                                                                                                                                                              |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.init_array` 边界与调用                                                 | [linker.ld](../src/kernel/linker.ld) 定义边界，[kmain.cc](../src/kernel/kmain.cc) 清 `.bss` 后执行                                                                        |
+| `std::nothrow`、纯虚/已删除虚函数失败入口、弱 `__cxx_panic`              | 内核态 [src/kernel/cxx/runtime.cc](../src/kernel/cxx/runtime.cc)（失败转入 panic）；用户态纯虚/已删除虚函数入口位于 [src/user/crt/runtime.cc](../src/user/crt/runtime.cc) |
+| `operator new/delete`                                                    | [heap.cc](../src/kernel/mm/heap.cc)，受堆大小类别与对齐限制（见 [memory.md](memory.md)）                                                                                  |
+| `abort`                                                                  | 内核态 [src/libc/stdlib.cc](../src/libc/stdlib.cc)（转入 panic）；用户态 [src/user/crt/runtime.cc](../src/user/crt/runtime.cc)（输出至 stderr 并 `exit(134)`）            |
+| `memcpy/memmove/memset/memcmp/memchr`、`strlen/strcmp/strncmp`           | [src/libc/string.cc](../src/libc/string.cc)（静态库 `seele_string`，由内核 `seele_libc` 与用户 `seele_user_crt` 共享），声明于 [string.h](../src/libc/include/string.h)   |
+| `std::terminate` 系列、`malloc/free`、析构注册 (`atexit`/`__cxa_atexit`) | 未提供；避免引入带非平凡析构的静态对象                                                                                                                                    |
 
-`seele_libc` 用 C++ 实现并以 `extern "C"` 导出，编译时统一启用 `-fno-builtin` 防止自递归优化。
+`seele_string` / `seele_libc` 用 C++ 实现并以 `extern "C"` 导出，编译时统一启用 `-fno-builtin` 防止自递归优化。
+
+### 用户态程序与 `#embed` 构建流水线
+
+用户态程序（当前为 `user_shell`，源码位于 [src/user/shell/main.cc](../src/user/shell/main.cc)）使用与内核一致的 freestanding RV64GC/lp64d 编译选项，链接静态库 `seele_user_crt`（[start.S](../src/user/crt/start.S) + [io.cc](../src/user/crt/io.cc) + [runtime.cc](../src/user/crt/runtime.cc) + 共享静态库 `seele_string` 与 `seele_util`）与用户态链接脚本 [src/user/linker.ld](../src/user/linker.ld)（基址 `0x0000002000010000`，W^X 分段），产物为 `<buildDir>/user/shell.elf`（保留 `-g` 调试符号）。随后 `riscv64-unknown-elf-objcopy --strip-all` 生成裁剪镜像 `<buildDir>/user/shell.stripped.elf`，由 [src/kernel/proc/shell.cc](../src/kernel/proc/shell.cc) 通过 C++26 `#embed`（配合 `--embed-dir` 与 `OBJECT_DEPENDS`）直接嵌入内核 `.rodata`。
 
 ### 标准头文件与编译器 helper 边界
 

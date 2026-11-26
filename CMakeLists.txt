@@ -25,15 +25,18 @@ if(SEELE_HOST_TESTS)
 
     add_executable(seele_host_tests
         src/kernel/fdt/fdt.cc
-        src/kernel/util/format.cc
+        src/kernel/proc/elf_format.cc
+        src/util/format.cc
         src/tests/host/panic_stub.cc
         src/tests/host/addr_test.cc
+        src/tests/host/elf_test.cc
         src/tests/host/fdt_test.cc
         src/tests/host/format_and_device_test.cc
         src/tests/host/list_test.cc
     )
     target_include_directories(seele_host_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/kernel"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
     )
     target_include_directories(seele_host_tests SYSTEM PRIVATE
         "${LIBFDT_INCLUDE_DIR}"
@@ -288,12 +291,14 @@ add_executable(kernel
     src/kernel/mm/kalloc.cc
     src/kernel/mm/heap.cc
     src/kernel/mm/vm.cc
+    src/kernel/proc/elf_format.cc
+    src/kernel/proc/elf_loader.cc
     src/kernel/proc/process.cc
     src/kernel/proc/shell.cc
+    src/kernel/proc/syscall.cc
     src/kernel/sched/switch.S
     src/kernel/sched/schedule.cc
-    src/kernel/util/format.cc
-    src/cxx/runtime.cc
+    src/kernel/cxx/runtime.cc
 )
 
 if(SEELE_TESTS)
@@ -302,6 +307,7 @@ if(SEELE_TESTS)
         src/kernel/test/mm_test.cc
         src/kernel/test/platform_test.cc
         src/kernel/test/sync_test.cc
+        src/kernel/test/user_test.cc
     )
 endif()
 
@@ -317,8 +323,12 @@ target_compile_options(kernel PRIVATE
 )
 
 # Kernel headers are included as "fdt/fdt.h" and "mm/addr.h", i.e. relative to
-# the kernel source root rather than to the file doing the include.
-target_include_directories(kernel PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/kernel")
+# the kernel source root rather than to the file doing the include. Shared
+# kernel/user UAPI headers are included as "uapi/syscall.h".
+target_include_directories(kernel PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/kernel"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
 
 # libstdc++ turns its own precondition checks on when _GLIBCXX_ASSERTIONS is
 # defined; Release leaves them out, Debug pays for them. A failed check calls
@@ -341,20 +351,112 @@ target_link_options(kernel PRIVATE
     -Wl,--no-relax-gp
 )
 
-# The kernel's own C library. It is a separate static library so it can grow
-# its own surface (add files here). -fno-builtin prevents the compiler from
-# turning libc implementations into recursive calls to themselves.
-add_library(seele_libc STATIC
+# Freestanding C string functions shared by both the kernel and user programs.
+# -fno-builtin prevents the compiler from turning implementations into
+# recursive calls to themselves.
+add_library(seele_string STATIC
     src/libc/string.cc
-    src/libc/stdlib.cc
 )
-target_include_directories(seele_libc PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src/libc/include")
-target_compile_options(seele_libc PRIVATE
+target_include_directories(seele_string PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src/libc/include")
+target_compile_options(seele_string PRIVATE
     ${SEELE_COMPILE_OPTIONS}
     -fno-builtin
 )
 
-target_link_libraries(kernel PRIVATE seele_libc)
+# Freestanding utilities shared by both the kernel and user programs.
+add_library(seele_util STATIC
+    src/util/format.cc
+)
+target_include_directories(seele_util PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_options(seele_util PRIVATE
+    ${SEELE_COMPILE_OPTIONS}
+)
+target_compile_definitions(seele_util PRIVATE
+    $<$<CONFIG:Debug>:_GLIBCXX_ASSERTIONS>
+)
+
+# The kernel's own C library: adds kernel-side abort() on top of seele_string.
+add_library(seele_libc STATIC
+    src/libc/stdlib.cc
+)
+target_compile_options(seele_libc PRIVATE
+    ${SEELE_COMPILE_OPTIONS}
+    -fno-builtin
+)
+target_link_libraries(seele_libc PUBLIC seele_string)
+
+target_link_libraries(kernel PRIVATE seele_libc seele_util)
+
+# -----------------------------------------------------------------------------
+# User-space CRT and embedded shell executable
+# -----------------------------------------------------------------------------
+set(SEELE_USER_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/src/user/linker.ld")
+set(SEELE_USER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/user")
+set(SEELE_SHELL_EMBED_PATH "${SEELE_USER_OUTPUT_DIR}/shell.stripped.elf")
+
+find_program(SEELE_OBJCOPY NAMES riscv64-unknown-elf-objcopy REQUIRED)
+
+add_library(seele_user_crt STATIC
+    src/user/crt/start.S
+    src/user/crt/io.cc
+    src/user/crt/runtime.cc
+)
+target_include_directories(seele_user_crt PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/user"
+)
+target_compile_options(seele_user_crt PRIVATE
+    ${SEELE_COMPILE_OPTIONS}
+)
+target_compile_definitions(seele_user_crt PRIVATE
+    $<$<CONFIG:Debug>:_GLIBCXX_ASSERTIONS>
+)
+target_link_libraries(seele_user_crt PUBLIC seele_string seele_util)
+
+add_executable(user_shell
+    src/user/shell/main.cc
+)
+set_target_properties(user_shell PROPERTIES
+    OUTPUT_NAME "shell"
+    SUFFIX ".elf"
+    LINK_DEPENDS "${SEELE_USER_LINKER_SCRIPT}"
+    RUNTIME_OUTPUT_DIRECTORY "${SEELE_USER_OUTPUT_DIR}"
+)
+target_compile_options(user_shell PRIVATE
+    ${SEELE_COMPILE_OPTIONS}
+)
+target_compile_definitions(user_shell PRIVATE
+    $<$<CONFIG:Debug>:_GLIBCXX_ASSERTIONS>
+)
+target_link_options(user_shell PRIVATE
+    -nostdlib
+    -nostartfiles
+    -static
+    -Wl,-T,${SEELE_USER_LINKER_SCRIPT}
+    -Wl,--gc-sections
+    -Wl,--build-id=none
+    -Wl,--no-relax-gp
+)
+target_link_libraries(user_shell PRIVATE seele_user_crt)
+
+# Strip debug/symbol sections for #embed while keeping the full unstripped
+# build/user/shell.elf alongside it for debugging and address symbolization.
+add_custom_command(
+    OUTPUT "${SEELE_SHELL_EMBED_PATH}"
+    COMMAND "${SEELE_OBJCOPY}" --strip-all "$<TARGET_FILE:user_shell>" "${SEELE_SHELL_EMBED_PATH}"
+    DEPENDS user_shell
+    COMMENT "Stripping user shell ELF for #embed"
+    VERBATIM
+)
+add_custom_target(user_shell_embed
+    DEPENDS "${SEELE_SHELL_EMBED_PATH}"
+)
+
+add_dependencies(kernel user_shell_embed)
+set_source_files_properties(src/kernel/proc/shell.cc PROPERTIES
+    COMPILE_OPTIONS "--embed-dir=${SEELE_USER_OUTPUT_DIR}"
+    OBJECT_DEPENDS "${SEELE_SHELL_EMBED_PATH}"
+)
 
 message(STATUS "seele-os target: ${SEELE_RISCV_ARCH}/${SEELE_RISCV_ABI}, cmodel=${SEELE_RISCV_CMODEL}")
 message(STATUS "seele-os linker: ${SEELE_LINKER_SCRIPT}")

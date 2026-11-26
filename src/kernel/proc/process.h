@@ -51,6 +51,13 @@ void init(Paddr kernel_pagetable) noexcept;
 // accessible). Panics on stack-slot or heap exhaustion.
 [[nodiscard]] thread* make_thread(process* owner, void (*entry)()) noexcept;
 
+// Create a user-mode thread in `owner` (must not be `kernel_proc()`). Prepares
+// an initial `trap::trap_frame` at the top of its kernel stack with `sepc =
+// entry_pc`, `sp = user_sp` (16-byte aligned), `SPP = 0` (U-mode), and `SPIE =
+// 1`, so its first schedule enters U-mode via `trap::enter_user()`. Does not
+// enqueue the thread; panics on stack-slot or heap exhaustion.
+[[nodiscard]] thread* make_user_thread(process* owner, Vaddr entry_pc, Vaddr user_sp) noexcept;
+
 // Allocate a new process object on the kernel heap around an initialized root
 // `pagetable` (e.g. from `vm::k::create_process_pagetable()`). Does not activate
 // the page table or create threads; panics on OOM.
@@ -92,6 +99,7 @@ enum class ThreadState : uint32_t {
     Running,   // executing on its bound hart (`cpu->current == this`)
     Blocking,  // preparing to sleep with local interrupts disabled
     Blocked,   // parked in its bound hart's `sleeping` queue until woken
+    Exited,    // permanently terminated via SYS_EXIT or unhandled user fault
 };
 
 [[nodiscard]] constexpr const char* thread_state_name(ThreadState state) noexcept {
@@ -101,6 +109,7 @@ enum class ThreadState : uint32_t {
         case ThreadState::Running: return "running";
         case ThreadState::Blocking: return "blocking";
         case ThreadState::Blocked: return "blocked";
+        case ThreadState::Exited: return "exited";
     }
     return "unknown";
 }
@@ -116,6 +125,8 @@ struct thread {
     kernel_stack kstack;
     std::atomic<ThreadState> state{ThreadState::Created};
     std::atomic<::cpu*> hart{nullptr};
+    std::atomic<int64_t> exit_code{0};
+    std::atomic<uint64_t> fault_cause{0};
     thread* prev = nullptr;
     thread* next = nullptr;
 };
@@ -124,6 +135,10 @@ static_assert(std::atomic<ThreadState>::is_always_lock_free,
               "ThreadState atomics must not require libatomic helpers");
 static_assert(std::atomic<::cpu*>::is_always_lock_free,
               "hart pointer atomics must not require libatomic helpers");
+static_assert(std::atomic<int64_t>::is_always_lock_free,
+              "exit_code atomics must not require libatomic helpers");
+static_assert(std::atomic<uint64_t>::is_always_lock_free,
+              "fault_cause atomics must not require libatomic helpers");
 
 static_assert(offsetof(kernel_context, ra) == 0);
 static_assert(offsetof(kernel_context, sp) == 8);

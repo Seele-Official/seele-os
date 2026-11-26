@@ -83,6 +83,10 @@ void attach_boot(ConsoleSink& sink) noexcept;
 // no console lock; panics if no readable CharDevice is attached.
 [[nodiscard]] char read() noexcept;
 
+// Write raw bytes directly to the attached ConsoleSink under the console lock
+// without format-string parsing. Drops output once panic mode is latched.
+void write(std::string_view data) noexcept;
+
 // Drain all accepted output to the attached ConsoleSink by polling until quiet.
 // Takes console + device locks (never schedules). No-op once panic is latched.
 void flush() noexcept;

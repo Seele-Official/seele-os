@@ -13,14 +13,14 @@
 
 Jump directly to the authoritative source and doc for your task instead of scanning the repo blindly. Use [README.md](README.md) for a high-level capability/boundary summary and [docs/conventions.md](docs/conventions.md) for naming, C++ Core Guidelines & freestanding rules, comments, and doc rules.
 
-| Task Area                         | Primary Source Paths                                                                                      | Read First                                   |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| Boot & cross-module design        | `src/kernel/start.S`, `start.cc`, `kmain.cc`, `hart.*`, `boot/`, `linker.ld`                              | [docs/architecture.md](docs/architecture.md) |
-| Memory, Sv39 VM & heap            | `src/kernel/mm/` (`addr.h`, `kalloc.*`, `vm.*`, `heap.*`)                                                 | [docs/memory.md](docs/memory.md)             |
-| FDT, devices, drivers, I/O        | `src/kernel/fdt/`, `platform/`, `drivers/`, `console.*`, `char_device.h`, `device_object.h`               | [docs/platform.md](docs/platform.md)         |
-| Threads, traps & locks            | `src/kernel/proc/`, `src/kernel/sched/`, `trap.*`, `tvec.S`, `concurrency/`                               | [docs/scheduling.md](docs/scheduling.md)     |
-| Logging, panic, backtrace & tests | `src/kernel/console.*`, `panic.*`, `stacktrace.*`, `util/format.*`, `src/kernel/test/`, `src/tests/host/` | [docs/debug.md](docs/debug.md)               |
-| Runtime, ABI & build tools        | `src/libc/`, `src/cxx/runtime.cc`, `CMakeLists.txt`, `cmake/`, `tools/`, `pixi.toml`                      | [docs/build.md](docs/build.md)               |
+| Task Area                         | Primary Source Paths                                                                                          | Read First                                   |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| Boot & cross-module design        | `src/kernel/start.S`, `start.cc`, `kmain.cc`, `hart.*`, `boot/`, `linker.ld`                                  | [docs/architecture.md](docs/architecture.md) |
+| Memory, Sv39 VM & heap            | `src/kernel/mm/` (`addr.h`, `kalloc.*`, `vm.*`, `heap.*`)                                                     | [docs/memory.md](docs/memory.md)             |
+| FDT, devices, drivers, I/O        | `src/kernel/fdt/`, `platform/`, `drivers/`, `console.*`, `char_device.h`, `device_object.h`                   | [docs/platform.md](docs/platform.md)         |
+| Threads, traps & locks            | `src/kernel/proc/`, `src/kernel/sched/`, `trap.*`, `tvec.S`, `concurrency/`                                   | [docs/scheduling.md](docs/scheduling.md)     |
+| Logging, panic, backtrace & tests | `src/kernel/console.*`, `panic.*`, `stacktrace.*`, `src/util/format.*`, `src/kernel/test/`, `src/tests/host/` | [docs/debug.md](docs/debug.md)               |
+| Runtime, ABI & build tools        | `src/libc/`, `src/kernel/cxx/runtime.cc`, `src/user/crt/`, `CMakeLists.txt`, `cmake/`, `tools/`, `pixi.toml`  | [docs/build.md](docs/build.md)               |
 
 ## Hard Invariants & Gotchas
 
@@ -69,14 +69,14 @@ All commands run from the repository root via Pixi ([pixi.toml](pixi.toml) is ca
 
 Never treat a clean build as proof of correctness. Match verification to what changed (all tools via `pixi run`):
 
-| Change Type                           | Required Verification                                                                                                                |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| Kernel code                           | `pixi run build` + `pixi run test` (or targeted `test-host`/`test-kernel`) + manual QEMU shell check when shell/boot path is touched |
-| Host-testable logic / host tests      | `pixi run test-host` (ASan/UBSan/LSan)                                                                                               |
-| ABI, `src/libc/`, `src/cxx/`, runtime | Release & Debug builds + `pixi run riscv64-unknown-elf-nm -u <dir>/kernel.elf` (expect no output) per [docs/build.md](docs/build.md) |
-| Struct layout, page table, boot stack | Verify `static_assert`s + Debug build + `pixi run test-kernel` / QEMU run                                                            |
-| Multi-hart / shared state / locks     | `pixi run test-kernel` (4 harts) and/or multi-hart boot (`pixi run qemu 4`)                                                          |
-| Docs-only                             | Skip kernel rebuild; verify referenced commands & relative links + Prettier + `git diff --check`                                     |
+| Change Type                                                   | Required Verification                                                                                                                                         |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Kernel code                                                   | `pixi run build` + `pixi run test` (or targeted `test-host`/`test-kernel`) + manual QEMU shell check when shell/boot path is touched                          |
+| Host-testable logic / host tests                              | `pixi run test-host` (ASan/UBSan/LSan)                                                                                                                        |
+| ABI, `src/libc/`, `src/kernel/cxx/`, `src/user/crt/`, runtime | Release & Debug builds + `pixi run riscv64-unknown-elf-nm -u <dir>/kernel.elf` & `<dir>/user/shell.elf` (expect no output) per [docs/build.md](docs/build.md) |
+| Struct layout, page table, boot stack                         | Verify `static_assert`s + Debug build + `pixi run test-kernel` / QEMU run                                                                                     |
+| Multi-hart / shared state / locks                             | `pixi run test-kernel` (4 harts) and/or multi-hart boot (`pixi run qemu 4`)                                                                                   |
+| Docs-only                                                     | Skip kernel rebuild; verify referenced commands & relative links + Prettier + `git diff --check`                                                              |
 
 - **QEMU shutdown hygiene.** `-serial stdio -monitor none` disables `Ctrl-A X`, and `Ctrl-C` in the shell only cancels the current input line. Track and terminate only the specific QEMU process you launched; never bulk-kill unrelated QEMU instances.
 - **Final handoff.** Review the full diff and run `git diff --check`. Summarize what changed, which checks actually ran (including any failures), and what remains unverified—never claim checks you did not run.

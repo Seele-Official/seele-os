@@ -66,20 +66,26 @@ constexpr Section BOOT_STACK{linker::__boot_stack_start, linker::__boot_stack_en
 
 // Sv39 kernel address-space layout and page-table management.
 //
-//   - Direct map (root entries 0..255): identity-mapped image, RAM, and MMIO.
+//   - Direct map (root entries 0..127): identity-mapped image, RAM, and MMIO.
+//   - Per-process user space (root entries 128..255): private U-mode mappings
+//     (see namespace `vm::u`).
 //   - Heap window (root entries 256..262): seven 1 GiB arenas, grown on demand.
 //   - Shared kernel-stack window (root entry 508): 1 GiB arena of guarded
 //     per-thread kernel stacks shared across all harts and processes.
 //
-// Shared kernel root entries (0..262 and 508) freeze when init() returns; the
-// system process runs directly on `pagetable()`, and additional process roots
-// copy those frozen entries verbatim.
+// Shared kernel root entries (0..127, 256..262, and 508) freeze when init()
+// returns; the system process runs directly on `pagetable()`, and additional
+// process roots copy those frozen entries verbatim while keeping entries
+// 128..255 private and zero-initialized.
 namespace k {
 
+// One canonical half of Sv39 (256 GiB, root entries 0..255).
+constexpr uint64_t SV39_HALF_SIZE = 1ull << 38;
+
 // Direct-map offset (currently identity mapped) and physical coverage bound
-// [DIRECT_MAP_BASE, DIRECT_MAP_END) = [0, 2^38).
+// [DIRECT_MAP_BASE, DIRECT_MAP_END) = [0, 2^37) (128 GiB, root entries 0..127).
 constexpr uint64_t PAGE_OFFSET = 0;
-constexpr uint64_t DIRECT_MAP_SIZE = 1ull << 38;
+constexpr uint64_t DIRECT_MAP_SIZE = 1ull << 37;
 constexpr Paddr DIRECT_MAP_BASE = paddr(0);
 constexpr Paddr DIRECT_MAP_END = paddr(DIRECT_MAP_SIZE);
 
@@ -125,7 +131,7 @@ constexpr Vaddr KSTACK_BASE = KSTACK_TOP - KSTACK_SIZE;
 // Kernel heap window at the start of Sv39's high canonical half: one 1 GiB
 // level-2 entry per heap size class (matching heap::CLASS_COUNT), mapped on
 // demand so free() can derive the class directly from the address.
-constexpr Vaddr HEAP_BASE = vaddr(~(DIRECT_MAP_SIZE - 1));
+constexpr Vaddr HEAP_BASE = vaddr(~(SV39_HALF_SIZE - 1));
 constexpr uint64_t HEAP_ARENA_SIZE = 1ull << 30;  // one Sv39 level-2 entry
 constexpr uint64_t HEAP_ARENA_COUNT = 7;          // 16, 32, 64, 128, 256, 512, 1024
 
@@ -181,6 +187,70 @@ void enable(Paddr pagetable) noexcept;
 [[nodiscard]] bool mappages(Vaddr va, uint64_t size, Paddr pa) noexcept;
 
 }  // namespace k
+
+// Per-process user virtual address space occupying Sv39 root entries 128..255
+// ([USER_BASE, USER_TOP), 128 GiB). Completely disjoint from the kernel direct
+// map (0..127), heap (256..262), and shared kstack window (508), so every user
+// process owns its own private subtrees under entries 128..255.
+//
+// User memory copy helpers translate through the process page table and copy
+// via the kernel direct map rather than setting sstatus.SUM, so accidental
+// direct dereference of user pointers from supervisor mode still faults.
+namespace u {
+
+constexpr Vaddr USER_BASE = vaddr(0x0000'0020'0000'0000ull);
+constexpr Vaddr USER_TOP = vaddr(0x0000'0040'0000'0000ull);
+
+// Initial user stack at the top of user space, bracketed by one unmapped page
+// above (at USER_TOP - PGSIZE) and one unmapped guard page below.
+constexpr uint64_t USER_STACK_SIZE = 4 * riscv::PGSIZE;
+constexpr uint64_t USER_STACK_GUARD_SIZE = riscv::PGSIZE;
+constexpr Vaddr USER_STACK_TOP = USER_TOP - riscv::PGSIZE;
+constexpr Vaddr USER_STACK_BASE = USER_STACK_TOP - USER_STACK_SIZE;
+
+// Exclusive upper bound for ELF PT_LOAD segments (below the stack guard page).
+constexpr Vaddr USER_LOAD_LIMIT = USER_STACK_BASE - USER_STACK_GUARD_SIZE;
+
+// True when [va, va + size) does not overflow and lies inside [USER_BASE, USER_TOP).
+[[nodiscard]] constexpr bool is_user_range(Vaddr va, uint64_t size) noexcept {
+    return range_fits(va, size) && va >= USER_BASE && range_end(va, size) <= USER_TOP;
+}
+
+// Map [va, va + size) -> [pa, pa + size) into a private user process root table
+// with `perm | PTE_U`. Panics if `root_pa` is the kernel root, misaligned, out
+// of [USER_BASE, USER_TOP), or already mapped; returns false on page-table OOM.
+[[nodiscard]] bool
+    map_user_pages(Paddr root_pa, Vaddr va, uint64_t size, Paddr pa, uint64_t perm) noexcept;
+
+// Translate a user virtual byte address in `root_pa`, requiring a valid leaf
+// with `PTE_U | required_perm`. Returns std::nullopt if out of range, unmapped,
+// or missing any required permission bit.
+[[nodiscard]] std::optional<Paddr> translate_user(Paddr root_pa,
+                                                  Vaddr va,
+                                                  uint64_t required_perm) noexcept;
+
+// Verify that every page covering [va, va + size) is inside user space and
+// mapped with `PTE_U | required_perm`.
+[[nodiscard]] bool
+    check_user_range(Paddr root_pa, Vaddr va, size_t size, uint64_t required_perm) noexcept;
+
+// Copy `size` bytes from user virtual address `src_va` in `root_pa` into kernel
+// buffer `dst`, checking `PTE_U | PTE_R` on every page crossed. Returns false
+// on any invalid address or permission failure (earlier bytes may be written).
+[[nodiscard]] bool copy_from_user(Paddr root_pa, void* dst, Vaddr src_va, size_t size) noexcept;
+
+// Copy `size` bytes from kernel buffer `src` into user virtual address `dst_va`
+// in `root_pa`, checking `PTE_U | PTE_R | PTE_W` on every page crossed. Returns
+// false on any invalid address or permission failure (earlier bytes may be
+// written; call check_user_range() first when all-or-nothing is required).
+[[nodiscard]] bool copy_to_user(Paddr root_pa, Vaddr dst_va, const void* src, size_t size) noexcept;
+
+// Free all user leaf physical pages and private intermediate page tables under
+// root entries 128..255, leaving shared kernel root entries untouched. Caller
+// must ensure no hart is actively translating through `root_pa`.
+void destroy_user_mappings(Paddr root_pa) noexcept;
+
+}  // namespace u
 
 // Low-level Sv39 mapper: map [va, va + size) onto [pa, pa + size) with `perm`
 // (PTE_R/W/X/U; PTE_V added here), allocating missing intermediate tables from

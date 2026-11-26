@@ -137,11 +137,11 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
 #if SEELE_TESTS
         sched::enqueue(proc::make_thread(proc::kernel_proc(), &ktest::runner_entry));
 #else
-        // Shell is another kernel thread in the system process, not a separate
-        // process. Queue it only when a readable console device is attached; an
-        // output-only early sink leaves this hart running idle silently.
+        // Spawn the embedded user-mode shell process when a readable console
+        // device is attached; an output-only early sink leaves this hart
+        // running idle silently.
         if(console::can_read()) {
-            sched::enqueue(proc::make_thread(proc::kernel_proc(), &proc::shell));
+            sched::enqueue(proc::spawn_shell());
         }
 #endif
 

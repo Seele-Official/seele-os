@@ -6,14 +6,15 @@
 
 [addr.h](../src/kernel/mm/addr.h) 将 `Paddr` 和 `Vaddr` 定义为独立的 64 位强类型，通过 `paddr()` / `vaddr()`、`to_uint64()` 及 `to_pointer<T>()` 显式转换，禁止混用或裸整数替代。区间统一采用半开区间 `[begin, end)`，辅助函数详见头文件注释。
 
-[vm.h](../src/kernel/mm/vm.h) 定义 `PAGE_OFFSET = 0`（恒等 direct map）与 `DIRECT_MAP_SIZE = 1ull << 38`。`vm::k::P2V()` / `V2P()` 仅适用于 direct-map 区域内的物理页，**不得用于高位内核堆或线程栈地址**。
+[vm.h](../src/kernel/mm/vm.h) 定义 `PAGE_OFFSET = 0`（恒等 direct map）与 `DIRECT_MAP_SIZE = 1ull << 37`（128 GiB）。`vm::k::P2V()` / `V2P()` 仅适用于 direct-map 区域内的物理页，**不得用于用户地址、高位内核堆或线程栈地址**。
 
-| Sv39 根项        | 用途                                                                                  |
-| ---------------- | ------------------------------------------------------------------------------------- |
-| 0–255            | direct-map 窗口 `[0, 2^38)`：映射内核镜像、启动栈及启动期发现的 RAM、保留区与 MMIO 页 |
-| 256–262          | 共享内核堆（`HEAP_BASE = 0xffff_ffc0_0000_0000`）：7 个 1 GiB arena，每大小类别一个   |
-| 263–507、509–511 | 保留未用                                                                              |
-| 508              | 共享线程内核栈窗口（`KSTACK_WINDOW_BASE = 0xffff_ffff_0000_0000`，大小 1 GiB）        |
+| Sv39 根项        | 用途                                                                                                    |
+| ---------------- | ------------------------------------------------------------------------------------------------------- |
+| 0–127            | direct-map 窗口 `[0, 2^37)`（128 GiB）：映射内核镜像、启动栈及启动期发现的 RAM、保留区与 MMIO 页        |
+| 128–255          | 进程私有用户虚拟空间 `[0x0000_0020_0000_0000, 0x0000_0040_0000_0000)`（128 GiB，`PTE_U=1`，每进程独立） |
+| 256–262          | 共享内核堆（`HEAP_BASE = 0xffff_ffc0_0000_0000`）：7 个 1 GiB arena，每大小类别一个                     |
+| 263–507、509–511 | 保留未用                                                                                                |
+| 508              | 共享线程内核栈窗口（`KSTACK_WINDOW_BASE = 0xffff_ffff_0000_0000`，大小 1 GiB）                          |
 
 ## 物理页分配器
 
@@ -44,7 +45,7 @@ boot hart 在 [kmain.cc](../src/kernel/kmain.cc) 初始化物理池后，于分�
 2. 将 `Usable`/`Reserved` 内存区与设备 MMIO 裁入 direct-map、向外取整页合并后映射为 R+W 不可执行，跳过已有叶子以保留镜像权限。`Reserved` 仅表示不由物理池分配；`mmio::map()` 见 [mmio.h](../src/kernel/platform/mmio.h)，只借用此阶段建好的别名。
 3. 为堆根项 256–262 与内核栈根项 508 各预建一张清零的共享 level-1 表，并回读校验镜像各权限组的首个叶子。
 
-这张内核根页表由 `vm::k::pagetable()` 暴露，直接作为全局唯一系统进程 `proc::kernel_proc()` 的根页表。**共享内核根项（0–262 与 508）在 `vm::k::init()` 后冻结**；后续调用 `create_process_pagetable()` 为新进程分配根表时，原样复制根项 0–262 与 508，运行期堆与内核栈扩展仅写入已共享的下级页表。
+这张内核根页表由 `vm::k::pagetable()` 暴露，直接作为系统进程 `proc::kernel_proc()` 的根页表。**共享内核根项（0–127、256–262 与 508）在 `vm::k::init()` 后冻结**；后续调用 `create_process_pagetable()` 为新用户进程分配根表时，原样复制这些共享根项并保持根项 128–255 全零私有，运行期堆与内核栈扩展仅写入已共享的下级页表。
 
 每个 hart 直接使用 `vm::k::pagetable()` 调用 `vm::k::enable()` 写入 `satp` 并执行本地 `sfence.vma`；secondary hart 在 acquire 读取 `g_started` 后执行相同步骤。跨进程切换时由 [switch.S](../src/kernel/sched/switch.S) 更新 `satp`（同一进程内的内核线程切换跳过 `satp` 写入）。
 
@@ -53,6 +54,7 @@ boot hart 在 [kmain.cc](../src/kernel/kmain.cc) 初始化物理池后，于分�
 - **`vm::mappages()`**：要求 `va`、`pa`、`size` 页对齐，`perm` 在 `PTE_LEAF_MASK` 内且合法（W 必带 R），禁止重复映射；调用方须保证虚拟与物理地址范围有效。中途页表页分配失败时返回 `false`，不回滚已写入项且不刷新 TLB。硬件 A/D 位更新依赖 [start.cc](../src/kernel/start.cc) 配置 `menvcfg.ADUE`。
 - **`vm::k::mappages()`**：供共享堆与共享内核栈扩展使用，在共享页表锁下向已预留根项子树添加 R+W 不可执行映射，成功时执行本地 `sfence.vma`。
 - **`vm::k::alloc_kernel_stack()` / `free_kernel_stack()`**：在共享根项 508 子树内按槽分配与回收带 guard 页的线程内核栈。
+- **`vm::u::map_user_pages()` / `translate_user()` / `check_user_range()` / `copy_from_user()` / `copy_to_user()` / `destroy_user_mappings()`**：管理进程私有根项 128–255 内的 `PTE_U=1` 用户映射与安全拷贝。内核全程保持 `sstatus.SUM = 0`，跨特权级拷贝通过软件遍历进程页表并校验 `PTE_V | PTE_U` 与读写权限后经内核直映完成，非法或跨界用户指针直接返回失败而不触发内核异常。`destroy_user_mappings()` 仅释放根项 128–255 下的用户叶子物理页与私有页表页，绝不触碰共享内核根项。
 
 ## 启动栈与线程栈
 
@@ -64,4 +66,4 @@ boot hart 在 [kmain.cc](../src/kernel/kmain.cc) 初始化物理池后，于分�
 - 无跨 hart TLB shootdown：当前仅新增映射且不撤销共享页，跨 hart 访问新映射依赖其他 hart 未缓存旧翻译。
 - 无引用计数、重复释放检测、物理页合并，或 `phymem::init()` 输入重叠去重。
 - 内核堆不支持超过 1024 字节的对象分配，释放后不归还数据页、不撤销映射且高水位不回退。
-- 无按需分页、用户地址空间或栈溢出恢复路径；访问 guard 页直接触发内核异常并 panic。
+- 无按需分页或栈溢出恢复路径；访问未映射 guard 页触发异常（内核态直接 panic，用户态由 `usertrap()` 终止故障线程）。
