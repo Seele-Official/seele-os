@@ -129,15 +129,15 @@ pixi run build
 | `-Wall -Wextra -Wpedantic`                             | 开启编译警告（当前未启用 `-Werror`）                             |
 | `-nostdlib -nostartfiles -static`                      | 不链接 CRT、宿主库或 libgcc                                      |
 
-`_entry` 固定在 [start.S](../src/kernel/start.S) 中完成选栈后再进入 C++。代码直接使用 Sstc 等 CSR，当前面向 QEMU `virt` 默认 ISA 配置。
+`_entry` 固定在 [boot/start.S](../src/kernel/boot/start.S) 中完成选栈后再进入 C++。代码直接使用 Sstc 等 CSR，当前面向 QEMU `virt` 默认 ISA 配置。
 
 ### 运行时符号归属
 
 | 符号/能力                                                                | 提供方与约束                                                                                                                                                              |
 | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `.init_array` 边界与调用                                                 | [linker.ld](../src/kernel/linker.ld) 定义边界，[kmain.cc](../src/kernel/kmain.cc) 清 `.bss` 后执行                                                                        |
+| `.init_array` 边界与调用                                                 | [linker.ld](../src/kernel/linker.ld) 定义边界，[kmain.cc](../src/kernel/kmain.cc) 清 `.bss` 后调用 [cxx/runtime.cc](../src/kernel/cxx/runtime.cc) 中的 `cxx::init()` 执行 |
 | `std::nothrow`、纯虚/已删除虚函数失败入口、弱 `__cxx_panic`              | 内核态 [src/kernel/cxx/runtime.cc](../src/kernel/cxx/runtime.cc)（失败转入 panic）；用户态纯虚/已删除虚函数入口位于 [src/user/crt/runtime.cc](../src/user/crt/runtime.cc) |
-| `operator new/delete`                                                    | [heap.cc](../src/kernel/mm/heap.cc)，受堆大小类别与对齐限制（见 [memory.md](memory.md)）                                                                                  |
+| `operator new/delete`                                                    | [src/kernel/cxx/new.cc](../src/kernel/cxx/new.cc) 桥接至 [heap.cc](../src/kernel/mm/heap.cc)，受堆大小类别与对齐限制（见 [memory.md](memory.md)）                         |
 | `abort`                                                                  | 内核态 [src/libc/stdlib.cc](../src/libc/stdlib.cc)（转入 panic）；用户态 [src/user/crt/runtime.cc](../src/user/crt/runtime.cc)（输出至 stderr 并 `exit(134)`）            |
 | `memcpy/memmove/memset/memcmp/memchr`、`strlen/strcmp/strncmp`           | [src/libc/string.cc](../src/libc/string.cc)（静态库 `seele_string`，由内核 `seele_libc` 与用户 `seele_user_crt` 共享），声明于 [string.h](../src/libc/include/string.h)   |
 | `std::terminate` 系列、`malloc/free`、析构注册 (`atexit`/`__cxa_atexit`) | 未提供；避免引入带非平凡析构的静态对象                                                                                                                                    |

@@ -6,7 +6,7 @@
 // the stack from the hartid before touching sp:
 //
 //   - hart 0 is the boot hart and gets the large stack (SEELE_BOOT_STACK_SIZE),
-//     because it runs the whole boot path: cxx_init, FDT parsing, the early
+//     because it runs the whole boot path: cxx::init, FDT parsing, the early
 //     console and driver probing;
 //   - every other hart gets a small stack (SEELE_SECONDARY_STACK_SIZE) and a
 //     dense cpuid, handed out by an atomic arrival-order counter.

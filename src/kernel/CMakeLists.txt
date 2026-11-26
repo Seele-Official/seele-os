@@ -4,13 +4,13 @@ include(KernelConfig)
 # and the freestanding libstdc++ headers. The kernel still provides its own
 # C library, C++ ABI and heap, and does not link libstdc++/libc.
 #
-# start.S must stay assembly: _entry runs before a stack exists and does the
-# per-hart stack selection. Do not merge it into start.cc: the compiler is free
-# to emit a prologue for a C++ function, so "does not use the stack" is not a
-# property the build can guarantee.
+# boot/start.S must stay assembly: _entry runs before a stack exists and does
+# the per-hart stack selection. Do not merge it into boot/start.cc: the
+# compiler is free to emit a prologue for a C++ function, so "does not use the
+# stack" is not a property the build can guarantee.
 add_executable(kernel
-    start.S
-    start.cc
+    boot/start.S
+    boot/start.cc
     kmain.cc
     panic.cc
     power.cc
@@ -41,6 +41,7 @@ add_executable(kernel
     proc/syscall.cc
     sched/switch.S
     sched/schedule.cc
+    cxx/new.cc
     cxx/runtime.cc
 )
 

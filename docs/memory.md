@@ -26,7 +26,7 @@
 
 ## 内核堆
 
-[heap.h](../src/kernel/mm/heap.h) / [heap.cc](../src/kernel/mm/heap.cc) 提供全内核共享的小对象分配器及全局 `operator new/delete`：
+[heap.h](../src/kernel/mm/heap.h) / [heap.cc](../src/kernel/mm/heap.cc) 提供全内核共享的小对象分配器（全局 `operator new/delete` 位于 [cxx/new.cc](../src/kernel/cxx/new.cc)，直接转发至 `heap::alloc()` / `heap::free()`）：
 
 - `heap::alloc(size, align)` 选取可同时满足大小与对齐的最小类别：`16, 32, 64, 128, 256, 512, 1024` 字节（默认 `DEFAULT_ALIGN = 16`）。`align` 须为非零 2 的幂，且 `size` 与 `align` 均不超过 1024；非法请求一律 panic（含 `new (std::nothrow)`）。
 - 每个类别独立持有空闲链锁与高水位指针；链空时向该类别预留的 level-1 子树尾部按需映射一页并切分为定长槽位。物理页、页表页或 arena 耗尽时 `heap::alloc()` 返回 `nullptr`（未映射成功的数据页会归还物理池）。普通 `new` 耗尽时 panic，nothrow 形式返回 `nullptr`。
@@ -51,14 +51,14 @@ boot hart 在 [kmain.cc](../src/kernel/kmain.cc) 初始化物理池后，于分�
 
 ### 映射接口契约
 
-- **`vm::mappages()`**：要求 `va`、`pa`、`size` 页对齐，`perm` 在 `PTE_LEAF_MASK` 内且合法（W 必带 R），禁止重复映射；调用方须保证虚拟与物理地址范围有效。中途页表页分配失败时返回 `false`，不回滚已写入项且不刷新 TLB。硬件 A/D 位更新依赖 [start.cc](../src/kernel/start.cc) 配置 `menvcfg.ADUE`。
+- **`vm::mappages()`**：要求 `va`、`pa`、`size` 页对齐，`perm` 在 `PTE_LEAF_MASK` 内且合法（W 必带 R），禁止重复映射；调用方须保证虚拟与物理地址范围有效。中途页表页分配失败时返回 `false`，不回滚已写入项且不刷新 TLB。硬件 A/D 位更新依赖 [boot/start.cc](../src/kernel/boot/start.cc) 配置 `menvcfg.ADUE`。
 - **`vm::k::mappages()`**：供共享堆与共享内核栈扩展使用，在共享页表锁下向已预留根项子树添加 R+W 不可执行映射，成功时执行本地 `sfence.vma`。
 - **`vm::k::alloc_kernel_stack()` / `free_kernel_stack()`**：在共享根项 508 子树内按槽分配与回收带 guard 页的线程内核栈。
 - **`vm::u::map_user_pages()` / `translate_user()` / `check_user_range()` / `copy_from_user()` / `copy_to_user()` / `destroy_user_mappings()`**：管理进程私有根项 128–255 内的 `PTE_U=1` 用户映射与安全拷贝。内核全程保持 `sstatus.SUM = 0`，跨特权级拷贝通过软件遍历进程页表并校验 `PTE_V | PTE_U` 与读写权限后经内核直映完成，非法或跨界用户指针直接返回失败而不触发内核异常。`destroy_user_mappings()` 仅释放根项 128–255 下的用户叶子物理页与私有页表页，绝不触碰共享内核根项。
 
 ## 启动栈与线程栈
 
-- **启动栈（按 hart）**：[start.S](../src/kernel/start.S) 将硬件 hart 0 固定为 `cpuid = 0`，secondary 通过 `.data` 中的 `boot_hart_seq` 原子分配稠密 `cpuid` 并写入 `tp`（超限停机）。[start.cc](../src/kernel/start.cc) 在 `.stack` 中静态分配 `boot_stacks`（布局由 [stack.h](../src/kernel/boot/stack.h) 与编译期断言约束；默认 64 槽、boot 64 KiB、secondary 8 KiB，共 568 KiB）。各 hart 切入 `idle()` 线程栈后逐页归还自身启动栈；未使用的启动栈槽位不回收。
+- **启动栈（按 hart）**：[boot/start.S](../src/kernel/boot/start.S) 将硬件 hart 0 固定为 `cpuid = 0`，secondary 通过 `.data` 中的 `boot_hart_seq` 原子分配稠密 `cpuid` 并写入 `tp`（超限停机）。[boot/start.cc](../src/kernel/boot/start.cc) 在 `.stack` 中静态分配 `boot_stacks`（布局由 [stack.h](../src/kernel/boot/stack.h) 与编译期断言约束；默认 64 槽、boot 64 KiB、secondary 8 KiB，共 568 KiB）。各 hart 切入 `idle()` 线程栈后逐页归还自身启动栈；未使用的启动栈槽位不回收。
 - **线程栈（全局共享窗口按槽分配）**：全系统共享 1 GiB 窗口 `[KSTACK_WINDOW_BASE, KSTACK_TOP)`，槽 `i` 栈顶位于 `KSTACK_TOP - i * KSTACK_SLOT_SIZE`。每槽由 `KSTACK_SIZE`（默认 16 KiB）映射页与下方 4 KiB 未映射 guard 页组成，共可容纳 `KSTACK_MAX_THREADS`（默认 52,428）个全局唯一线程栈。`vm::k::alloc_kernel_stack()` 在锁保护下优先 O(1) 弹出已归还槽位的栈首侵入式空闲链，链空时递增高水位并经 `vm::k::mappages()` 按页映射新槽；`free_kernel_stack()` 校验槽位对齐与已映射边界后将槽挂回空闲链（保持页面映射不撤销，避免跨 hart TLB shootdown）。[process.cc](../src/kernel/proc/process.cc) 中的 `proc::make_thread()` 取槽失败时 panic，并在线程对象中记录 `kstack` 供回溯使用。
 
 ## 当前限制

@@ -71,10 +71,10 @@ seele>
 
 ## 源码入口
 
-- [src/kernel/kmain.cc](src/kernel/kmain.cc)：S-mode 启动主线；M-mode 入口为 [start.S](src/kernel/start.S) 与 [start.cc](src/kernel/start.cc)。
+- [src/kernel/kmain.cc](src/kernel/kmain.cc)：S-mode 启动主线；M-mode 入口位于 [src/kernel/boot/](src/kernel/boot/)（[start.S](src/kernel/boot/start.S) 与 [start.cc](src/kernel/boot/start.cc)）。
 - [src/kernel/mm/](src/kernel/mm/)：物理页、页表与堆。
 - [src/kernel/platform/](src/kernel/platform/) 与 [src/kernel/drivers/](src/kernel/drivers/)：设备模型与驱动。
 - [src/kernel/proc/](src/kernel/proc/) 与 [src/kernel/sched/](src/kernel/sched/)：进程、线程、ELF64 加载、系统调用与调度。
 - [src/uapi/](src/uapi/) 与 [src/user/](src/user/)：内核/用户共享系统调用 UAPI、用户态 CRT 与独立用户态 shell。
-- [src/util/](src/util/) 与 [src/libc/](src/libc/)：内核与用户态共享的 freestanding 格式化/编译期字符串工具与 C 字符串库；内核 C++ ABI 位于 [src/kernel/cxx/runtime.cc](src/kernel/cxx/runtime.cc)。
+- [src/util/](src/util/) 与 [src/libc/](src/libc/)：内核与用户态共享的 freestanding 格式化/编译期字符串工具与 C 字符串库；内核 C++ 运行时与 `operator new/delete` 位于 [src/kernel/cxx/](src/kernel/cxx/)。
 - [tools/](tools/)：测试磁盘与 QEMU 启动脚本；[CMakeLists.txt](CMakeLists.txt)、[cmake/](cmake/) 与各模块 `CMakeLists.txt` 负责内核、用户态与宿主机测试构建。

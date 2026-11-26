@@ -9,6 +9,7 @@
 #include "riscv.h"
 #include "trap.h"
 #include "boot/stack.h"
+#include "cxx/runtime.h"
 #include "drivers/registry.h"
 #include "mm/kalloc.h"
 #include "mm/vm.h"
@@ -30,26 +31,13 @@
 using namespace riscv;
 using namespace riscv::registers;
 
-void cxx_init() {
-    // clear .bss
-    memset(vm::BSS.start, 0, vm::BSS.size());
-
-    // init cxx obj
-    using Constructor = void (*)();
-    for(auto fn = reinterpret_cast<Constructor*>(vm::INIT_ARRAY.start);
-        fn != reinterpret_cast<Constructor*>(vm::INIT_ARRAY.end);
-        ++fn) {
-        (*fn)();
-    }
-}
-
-// Secondaries read this while hart 0 is still booting, before cxx_init() has
-// run. constinit only guarantees constant initialization; it does not choose a
-// section, and a zero-valued constinit object still lands in .bss/.sbss with
-// this toolchain. The section attribute is what puts the flag in the loaded
-// segment, so its initial value is well defined even if the loader does not
-// zero .bss. On QEMU the loader does zero it, so this is belt and suspenders,
-// not a fix for an observed failure.
+// Secondaries read this while hart 0 is still booting, before .bss is cleared
+// and cxx::init() has run. constinit only guarantees constant initialization;
+// it does not choose a section, and a zero-valued constinit object still lands
+// in .bss/.sbss with this toolchain. The section attribute is what puts the
+// flag in the loaded segment, so its initial value is well defined even if the
+// loader does not zero .bss. On QEMU the loader does zero it, so this is belt
+// and suspenders, not a fix for an observed failure.
 static constinit std::atomic<bool> g_started __attribute__((section(".data"))) = false;
 
 // Called from idle() only after switching to that thread's kernel stack; the
@@ -98,7 +86,8 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
     // Do not overwrite tp with hartid here -- hartid stays a plain argument
     // because firmware is free to hand out sparse or large ids.
     if(cpuid() == 0) {
-        cxx_init();
+        memset(vm::BSS.start, 0, vm::BSS.size());
+        cxx::init();
         mycpu()->hartid = hartid;
         mycpu()->trap_scratch.kernel_tp = cpuid();
 

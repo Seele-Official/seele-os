@@ -15,12 +15,12 @@ Jump directly to the authoritative source and doc for your task instead of scann
 
 | Task Area                         | Primary Source Paths                                                                                          | Read First                                   |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| Boot & cross-module design        | `src/kernel/start.S`, `start.cc`, `kmain.cc`, `hart.*`, `boot/`, `linker.ld`                                  | [docs/architecture.md](docs/architecture.md) |
+| Boot & cross-module design        | `src/kernel/boot/` (`start.S`, `start.cc`, `stack.h`), `kmain.cc`, `hart.*`, `linker.ld`                      | [docs/architecture.md](docs/architecture.md) |
 | Memory, Sv39 VM & heap            | `src/kernel/mm/` (`addr.h`, `kalloc.*`, `vm.*`, `heap.*`)                                                     | [docs/memory.md](docs/memory.md)             |
 | FDT, devices, drivers, I/O        | `src/kernel/fdt/`, `platform/`, `drivers/`, `console.*`, `char_device.h`, `device_object.h`                   | [docs/platform.md](docs/platform.md)         |
 | Threads, traps & locks            | `src/kernel/proc/`, `src/kernel/sched/`, `trap.*`, `tvec.S`, `concurrency/`                                   | [docs/scheduling.md](docs/scheduling.md)     |
 | Logging, panic, backtrace & tests | `src/kernel/console.*`, `panic.*`, `stacktrace.*`, `src/util/format.*`, `src/kernel/test/`, `src/tests/host/` | [docs/debug.md](docs/debug.md)               |
-| Runtime, ABI & build tools        | `src/libc/`, `src/kernel/cxx/runtime.cc`, `src/user/crt/`, `CMakeLists.txt`, `cmake/`, `tools/`, `pixi.toml`  | [docs/build.md](docs/build.md)               |
+| Runtime, ABI & build tools        | `src/libc/`, `src/kernel/cxx/`, `src/user/crt/`, `CMakeLists.txt`, `cmake/`, `tools/`, `pixi.toml`            | [docs/build.md](docs/build.md)               |
 
 ## Hard Invariants & Gotchas
 

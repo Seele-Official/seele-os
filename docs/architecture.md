@@ -14,7 +14,7 @@ seele-os 当前面向 QEMU `virt` 的 S-mode 运行环境，采用以下设计�
 ## 模块分层
 
 ```text
-start.S → start.cc                    M-mode：选栈、cpuid、机器状态
+boot/start.S → boot/start.cc          M-mode：选栈、cpuid、机器状态
                 │ mret
                 ▼
 kmain.cc                              S-mode 启动编排
@@ -25,7 +25,7 @@ kmain.cc                              S-mode 启动编排
   └─ proc + sched + trap              线程入口、切换、中断与等待
 
 console + panic + stacktrace          启动与运行期输出与诊断
-libc + cxx/runtime                    freestanding 运行时支持
+libc + cxx                            freestanding 运行时支持
 ```
 
 ### 层间契约
@@ -37,7 +37,7 @@ libc + cxx/runtime                    freestanding 运行时支持
 | 控制器/设备 → trap | 控制器实现 `ExternalController` 的 claim/complete，设备注册 `ExternalHandler`；trap 不依赖具体硬件类型 |
 | 驱动 → console     | probe 后挂接 `CharDevice`；console 经抽象接口读写，UART 中断处理器不回调 console                       |
 | 驱动 → power       | probe 后挂接 `PowerDevice`；`power::poweroff()` 先排空 console 再关机，测试态 panic 走无锁紧急关机     |
-| 内核 → 运行时      | `libc` 与 `cxx/runtime` 提供 C/C++ ABI 符号，失败入口统一转入 panic                                    |
+| 内核 → 运行时      | `libc` 与 `cxx` 提供 C/C++ 运行时与 ABI 符号，失败入口统一转入 panic                                   |
 
 核心接口定义见 [device.h](../src/kernel/platform/device.h)、[char_device.h](../src/kernel/char_device.h)、[power.h](../src/kernel/power.h)、[trap.h](../src/kernel/trap.h)；生命周期与符号边界分别见 [platform.md](platform.md) 与 [build.md](build.md)。
 
@@ -49,9 +49,9 @@ libc + cxx/runtime                    freestanding 运行时支持
 
 | 阶段           | 动作                                                                                                                                     | 完成后满足的前置条件                                 |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| 汇编入口       | [start.S](../src/kernel/start.S) 分配 boot 栈，将 `cpuid = 0` 写入 `tp`                                                                  | 具备可用栈，全局 C++ 对象尚未构造                    |
-| M-mode 交接    | [start.cc](../src/kernel/start.cc) 配置机器状态，以 `satp = 0` 进入 S-mode                                                               | 可在无分页状态下访问物理 RAM 与 MMIO                 |
-| 早期发现       | 清 `.bss`、执行 `.init_array`，`platform::init()` 绑定 DTB 并挂接 early console                                                          | DTB 可查询；early console 就绪时可输出后续日志       |
+| 汇编入口       | [boot/start.S](../src/kernel/boot/start.S) 分配 boot 栈，将 `cpuid = 0` 写入 `tp`                                                        | 具备可用栈，全局 C++ 对象尚未构造                    |
+| M-mode 交接    | [boot/start.cc](../src/kernel/boot/start.cc) 配置机器状态，以 `satp = 0` 进入 S-mode                                                     | 可在无分页状态下访问物理 RAM 与 MMIO                 |
+| 早期发现       | 清 `.bss`、`cxx::init()` 执行 `.init_array`，`platform::init()` 绑定 DTB 并挂接 early console                                            | DTB 可查询；early console 就绪时可输出后续日志       |
 | 平台描述       | `platform::init()` 枚举设备并解析内存/保留区、hart、timebase 与 `/chosen`                                                                | 平台拓扑与设备资源表只读就绪                         |
 | 分页准备       | `phymem::init()`、`vm::k::init()`                                                                                                        | 物理页可分配，共享内核根表（含堆与内核栈子树）已建立 |
 | 启用分页       | `vm::k::enable(vm::k::pagetable())`                                                                                                      | 高位内核堆与共享线程栈窗口可访问                     |

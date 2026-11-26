@@ -9,8 +9,8 @@
 // address's high bits, so objects carry no header and free() needs no lookup.
 //
 // Requires no init() call, but is only usable after phymem::init() and
-// vm::k::enable(). Also backs C++ global operator new/delete (throwing forms
-// panic on OOM; nothrow forms return nullptr).
+// vm::k::enable(). Also backs C++ global operator new/delete in cxx/new.cc
+// (throwing forms panic on OOM; nothrow forms return nullptr).
 
 #include <cstddef>
 

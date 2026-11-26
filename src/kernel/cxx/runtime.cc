@@ -1,17 +1,13 @@
 // Minimal C++ ABI runtime for the freestanding libstdc++ subset.
 //
-// This file defines ONLY C++ implementation symbols: the libstdc++ ABI surface
-// and the C++ panic path.  It deliberately does not define any C library
-// symbol.  memcpy, memset, abort, malloc, ... are the kernel libc's job.
-//
-// It also does not define operator new/delete.  Those are the kernel heap's:
-// mm/heap.cc defines every replaceable form as a wrapper over heap::alloc() /
-// heap::free(), so a `new` expression has the heap's size limit (MAX_SIZE) and
-// panics when memory runs out.  Note that the deleting destructors of
-// std::exception/std::bad_exception reference operator delete, which the heap
-// provides, so those types can be used.
+// This file defines C++ initialization and ABI surface symbols: .init_array
+// constructor dispatch, the libstdc++ ABI surface, and the C++ panic path.
+// It deliberately does not define any C library symbol (memcpy, memset, abort,
+// ... are the kernel libc's job). Global operator new/delete live alongside
+// this file in cxx/new.cc and forward to the kernel heap (mm/heap.h).
 //
 // The symbols defined here are:
+//   cxx::init()
 //   std::nothrow
 //   __cxa_pure_virtual / __cxa_deleted_virtual
 //   __cxx_panic (weak)
@@ -21,8 +17,25 @@
 // std::get_terminate are only declared below; they are planned for when
 // exceptions are enabled (terminate -> panic, handlers in the hart context).
 
+#include "cxx/runtime.h"
+
 #include <exception>
 #include <new>
+
+#include "mm/vm.h"
+
+namespace cxx {
+
+void init() noexcept {
+    using Constructor = void (*)();
+    for(auto fn = reinterpret_cast<Constructor*>(vm::INIT_ARRAY.start);
+        fn != reinterpret_cast<Constructor*>(vm::INIT_ARRAY.end);
+        ++fn) {
+        (*fn)();
+    }
+}
+
+}  // namespace cxx
 
 extern "C" {
     [[noreturn]] void panic(const char* message);

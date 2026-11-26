@@ -49,7 +49,7 @@ alignas(ARENA_ALIGN) std::byte g_arena[ARENA_SIZE];
 size_t g_arena_used = 0;
 
 // Take `size` bytes out of the arena, or nullptr when it is full. The storage
-// is already zeroed: cxx_init() clears .bss before the first probe, and a block
+// is already zeroed: kmain() clears .bss before the first probe, and a block
 // is never handed out twice. The block is never returned either, because a
 // probed driver lives for the rest of the kernel.
 //
