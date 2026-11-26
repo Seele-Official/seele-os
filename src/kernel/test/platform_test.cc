@@ -101,6 +101,24 @@ KTEST_SMP_CASE(platform, smp_log_and_char_write) {
     ktest::barrier();
 }
 
+KTEST_SMP_CASE(platform, smp_char_device_concurrent_write) {
+    CharDevice* const dev = char_device::active();
+    KTEST_ASSERT(dev != nullptr);
+
+    // Exceed Ns16550's 128-byte TX ring from every hart concurrently so
+    // `m_tx_writer` (Mutex) serializes multi-chunk writers across harts.
+    constexpr size_t PAYLOAD_SIZE = 160;
+    char payload[PAYLOAD_SIZE]{};
+    const char fill = static_cast<char>('0' + (cpuid() % 10));
+    memset(payload, fill, PAYLOAD_SIZE - 1);
+    memcpy(payload, "[ktest-mtx-tx] ", 15);
+    payload[PAYLOAD_SIZE - 1] = '\n';
+
+    ktest::barrier();
+    KTEST_EXPECT_EQ(dev->write(std::span<const char>{payload, PAYLOAD_SIZE}), PAYLOAD_SIZE);
+    ktest::barrier();
+}
+
 KTEST_CASE(platform, libc_string_primitives) {
     char buf[32]{};
     memset(buf, 'x', 16);

@@ -1,9 +1,11 @@
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
 #include "hart.h"
 #include "riscv.h"
 #include "concurrency/lock_guard.h"
+#include "concurrency/mutex.h"
 #include "concurrency/semaphore.h"
 #include "concurrency/spinlock.h"
 #include "test/ktest.h"
@@ -56,6 +58,87 @@ KTEST_CASE(sync, semaphore_nonblocking) {
     sem.release();
     sem.acquire();
     KTEST_EXPECT(!sem.try_acquire());
+}
+
+KTEST_CASE(sync, mutex_basic) {
+    Mutex mtx{};
+    KTEST_ASSERT(riscv::is_intr_on());
+    KTEST_ASSERT_EQ(mycpu()->interrupt_depth, uint32_t{0});
+
+    KTEST_EXPECT(mtx.try_lock());
+    KTEST_EXPECT(riscv::is_intr_on());
+    KTEST_EXPECT_EQ(mycpu()->interrupt_depth, uint32_t{0});
+    KTEST_EXPECT(!mtx.try_lock());
+    mtx.unlock();
+
+    {
+        LockGuard guard{mtx};
+        KTEST_EXPECT(riscv::is_intr_on());
+        KTEST_EXPECT_EQ(mycpu()->interrupt_depth, uint32_t{0});
+        KTEST_EXPECT(!mtx.try_lock());
+    }
+
+    KTEST_EXPECT(mtx.try_lock());
+    mtx.unlock();
+}
+
+Mutex g_smp_mutex{};
+std::atomic<bool> g_smp_mutex_in_cs{false};
+std::atomic<size_t> g_smp_mutex_waiters_ready{0};
+uint64_t g_smp_mutex_counter = 0;
+
+KTEST_SMP_CASE(sync, smp_mutex_contention) {
+    constexpr uint64_t ROUNDS_PER_HART = 3;
+    const size_t harts = ktest::hart_count();
+
+    if(cpuid() == 0) {
+        g_smp_mutex_in_cs.store(false, std::memory_order_relaxed);
+        g_smp_mutex_waiters_ready.store(0, std::memory_order_relaxed);
+        g_smp_mutex_counter = 0;
+        g_smp_mutex.lock();
+    }
+    ktest::barrier();
+
+    // Phase 1: force secondary harts to observe the held mutex, queue on
+    // WaitQueue, and receive ownership via direct FIFO handoff.
+    if(cpuid() == 0) {
+        while(g_smp_mutex_waiters_ready.load(std::memory_order_acquire) < harts - 1) {}
+        const uint64_t release_at = riscv::csrr(riscv::registers::time) + 1000;
+        while(riscv::csrr(riscv::registers::time) < release_at) {}
+
+        KTEST_EXPECT(!g_smp_mutex_in_cs.exchange(true, std::memory_order_acq_rel));
+        ++g_smp_mutex_counter;
+        g_smp_mutex_in_cs.store(false, std::memory_order_release);
+        g_smp_mutex.unlock();
+    } else {
+        KTEST_EXPECT(!g_smp_mutex.try_lock());
+        g_smp_mutex_waiters_ready.fetch_add(1, std::memory_order_release);
+
+        LockGuard guard{g_smp_mutex};
+        KTEST_EXPECT(riscv::is_intr_on());
+        KTEST_EXPECT_EQ(mycpu()->interrupt_depth, uint32_t{0});
+        KTEST_EXPECT(!g_smp_mutex_in_cs.exchange(true, std::memory_order_acq_rel));
+        ++g_smp_mutex_counter;
+        g_smp_mutex_in_cs.store(false, std::memory_order_release);
+    }
+
+    ktest::barrier();
+
+    // Phase 2: repeated multi-hart contention via LockGuard<Mutex>.
+    for(uint64_t r = 0; r < ROUNDS_PER_HART; ++r) {
+        LockGuard guard{g_smp_mutex};
+        KTEST_EXPECT(riscv::is_intr_on());
+        KTEST_EXPECT(!g_smp_mutex_in_cs.exchange(true, std::memory_order_acq_rel));
+        ++g_smp_mutex_counter;
+        const uint64_t spin_until = riscv::csrr(riscv::registers::time) + 200;
+        while(riscv::csrr(riscv::registers::time) < spin_until) {}
+        g_smp_mutex_in_cs.store(false, std::memory_order_release);
+    }
+
+    ktest::barrier();
+    if(cpuid() == 0) {
+        KTEST_EXPECT_EQ(g_smp_mutex_counter, (1 + ROUNDS_PER_HART) * harts);
+    }
 }
 
 Spinlock g_smp_lock{};

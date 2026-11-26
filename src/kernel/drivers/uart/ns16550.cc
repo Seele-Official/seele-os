@@ -5,7 +5,7 @@
 //     `flush`) and lock-free panic output (`enter_panic`, `write_emergency`).
 //   - `CharDevice`: schedulable thread-context bidirectional stream I/O
 //     (`read` / `write`) backed by interrupt-driven RX/TX ring buffers and
-//     `WaitQueue`s, with a sleepable writer lock (`Semaphore`) serializing
+//     `WaitQueue`s, with a sleepable writer lock (`Mutex`) serializing
 //     concurrent multi-chunk writes. Interrupt-driven mode is mandatory:
 //     probe() panics if no usable IRQ line can be attached.
 //   - `trap::ExternalHandler`: services RX/TX interrupts and wakes blocked
@@ -32,7 +32,7 @@
 #include "riscv.h"
 #include "trap.h"
 #include "concurrency/lock_guard.h"
-#include "concurrency/semaphore.h"
+#include "concurrency/mutex.h"
 #include "concurrency/spinlock.h"
 #include "concurrency/wait_queue.h"
 #include "drivers/registry.h"
@@ -54,23 +54,6 @@ constexpr uint32_t IRQ_PRIORITY = 1;
 // Power-of-two ring capacities so indices wrap via bitmask.
 constexpr uint32_t TX_CAPACITY = 128;
 constexpr uint32_t RX_CAPACITY = 64;
-
-class SemaphoreGuard {
-public:
-    explicit SemaphoreGuard(Semaphore& sem) noexcept : m_sem(sem) {
-        m_sem.acquire();
-    }
-
-    ~SemaphoreGuard() noexcept {
-        m_sem.release();
-    }
-
-    SemaphoreGuard(const SemaphoreGuard&) = delete;
-    SemaphoreGuard& operator= (const SemaphoreGuard&) = delete;
-
-private:
-    Semaphore& m_sem;
-};
 
 class Ns16550 final : public device::Implements<ConsoleSink, CharDevice, trap::ExternalHandler> {
 public:
@@ -199,7 +182,7 @@ public:
         // Serialize concurrent multi-chunk writers with a sleepable lock so
         // large writes do not interleave mid-buffer while keeping `m_lock`
         // strictly short-held and non-sleeping.
-        SemaphoreGuard writer_guard{m_tx_writer};
+        LockGuard writer_guard{m_tx_writer};
 
         std::size_t written = 0;
         while(written < data.size()) {
@@ -362,7 +345,7 @@ private:
     uint32_t m_tx_fifo_depth = 1;
     uint32_t m_rx_fifo_depth = 1;
     std::atomic<bool> m_panicking{false};
-    Semaphore m_tx_writer{1};
+    Mutex m_tx_writer{};
     WaitQueue m_rx_waiters{};
     WaitQueue m_tx_waiters{};
     std::atomic<uint32_t> m_rx_overrun_count{0};

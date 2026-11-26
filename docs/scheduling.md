@@ -84,9 +84,10 @@
 
 队列与 `current` 由各自 `cpu->lock` 保护，更新 `current` 并释放锁后再执行切换。**所有触发切换的原语均要求调用方关中断（`SIE = 0`）且不持有任何自旋锁**。
 
-### 等待队列与信号量
+### 等待队列、互斥锁与信号量
 
 - [wait_queue.h](../src/kernel/concurrency/wait_queue.h) / [wait_queue.cc](../src/kernel/concurrency/wait_queue.cc) 提供外部加锁的 FIFO `WaitQueue`：等待者节点 `WaitQueue::waiter` 分配在阻塞线程自身内核栈上（因根项 508 内核栈窗口在所有进程页表间全局共享，跨 hart、跨进程与中断上下文均可直接摘链），零堆分配且 `WaitQueue` 平凡可析构（可用于静态存储）。`prepare_wait()` 负责调用 `sched::prepare_sleep()` 并入队；唤醒方须在持有外部锁期间通过 `pop_one()` 或 `take_all()` 摘除节点，释放锁后再调用 `sched::wake()` / `wake_all()`。
+- [mutex.h](../src/kernel/concurrency/mutex.h) / [mutex.cc](../src/kernel/concurrency/mutex.cc) 基于 `Spinlock` 与 `WaitQueue` 实现不可重入的可睡眠互斥锁 `Mutex`（`lock()` / `try_lock()` / `unlock()`，可直接配合 `LockGuard` 使用），平凡可析构；显式追踪持有线程 `proc::thread*`（递归加锁或非持有者解锁触发 panic），并采用直接所有权交接（FIFO handoff）：`unlock()` 唤醒队首等待者时直接将所有权移交该线程，避免插队与惊群。
 - [semaphore.h](../src/kernel/concurrency/semaphore.h) / [semaphore.cc](../src/kernel/concurrency/semaphore.cc) 基于 `Spinlock` 与 `WaitQueue` 实现计数信号量 `Semaphore`（`acquire()` / `try_acquire()` / `release()`），平凡可析构，采用直接名额交接（handoff）：`release()` 唤醒队首等待者时直接移交名额而不递增计数。
 
 ## 启动交接

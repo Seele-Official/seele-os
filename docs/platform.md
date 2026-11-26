@@ -122,7 +122,7 @@ secondary hart acquire 等待 `g_started`，不重复平台发现或驱动 probe
 
 [ns16550.cc](../src/kernel/drivers/uart/ns16550.cc) 的 `CharDevice::read(span)` 与 `CharDevice::write(span)` 仅允许在可调度线程上下文调用（已有当前线程且非 `idle`、`SIE = 1`、不持自旋锁；`read()` 另要求 **`cpuid == 0`**，因 PLIC 当前将 UART IRQ 路由到 hart 0 且尚无跨 hart 唤醒 IPI），且完全依赖中断驱动（无轮询回退）：
 
-- 由 `m_lock` 统一保护 64 字节 RX 环、128 字节 TX 环及对应的 `WaitQueue`（`m_rx_waiters`、`m_tx_waiters`），另以可睡眠二值 `Semaphore m_tx_writer{1}` 串行化并发的多段大块写（锁序：`m_tx_writer → m_lock`，睡眠前释放 `m_lock`）。
+- 由 `m_lock` 统一保护 64 字节 RX 环、128 字节 TX 环及对应的 `WaitQueue`（`m_rx_waiters`、`m_tx_waiters`），另以可睡眠 `Mutex m_tx_writer` 串行化并发的多段大块写（锁序：`m_tx_writer → m_lock`，睡眠前释放 `m_lock`）。
 - `read(span)`：关中断取 `m_lock`，有数据则一次尽可能拷出 `1..buffer.size()` 字节；为空且未 panic 时经 `m_rx_waiters.prepare_wait()` 登记后释放锁并 `sched::sleep()`。
 - `write(span)`：持 `m_tx_writer`，关中断取 `m_lock` 将字节填入 TX 环并按需开启 `IER_TX_EMPTY`；若尚有剩余字节（TX 环满）则登记 `m_tx_waiters` 后释放锁并 `sched::sleep()`。
 - `handle()`：持 `m_lock` 先收后发（各最多处理一个探测 FIFO 深度），有新收字节时摘出 `m_rx_waiters`，TX 环出现空位时摘出 `m_tx_waiters`，仅在 `transmit_count() == 0 && m_tx_waiters.empty()` 时关闭 `IER_TX_EMPTY`；**释放 `m_lock` 后**统一 `wake_all()`，由外部中断末尾的 `schedule()` 切换。
