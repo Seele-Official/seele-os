@@ -1,6 +1,6 @@
 # AGENTS.md
 
-`seele-os` is a freestanding C++26 RISC-V 64-bit experimental kernel targeting QEMU `virt` (`-bios none`, boots M-mode to S-mode without OpenSBI, no user space yet).
+`seele-os` is a freestanding C++26 RISC-V 64-bit experimental kernel targeting QEMU `virt` (`-bios none`, boots M-mode to S-mode without OpenSBI, with single-threaded U-mode user processes and an `#embed`-ed interactive shell).
 
 ## Operating Rules
 
@@ -17,8 +17,8 @@ Jump directly to the authoritative source and doc for your task instead of scann
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
 | Boot & cross-module design        | `src/kernel/boot/` (`start.S`, `start.cc`, `stack.h`), `kmain.cc`, `hart.*`, `linker.ld`                      | [docs/architecture.md](docs/architecture.md) |
 | Memory, Sv39 VM & heap            | `src/kernel/mm/` (`addr.h`, `kalloc.*`, `vm.*`, `heap.*`)                                                     | [docs/memory.md](docs/memory.md)             |
-| FDT, devices, drivers, I/O        | `src/kernel/fdt/`, `platform/`, `drivers/`, `console.*`, `char_device.h`, `device_object.h`                   | [docs/platform.md](docs/platform.md)         |
-| Threads, traps & locks            | `src/kernel/proc/`, `src/kernel/sched/`, `trap.*`, `tvec.S`, `concurrency/`                                   | [docs/scheduling.md](docs/scheduling.md)     |
+| FDT, devices, drivers, I/O        | `src/kernel/fdt/`, `platform/`, `drivers/`, `console.*`, `console_sink.h`, `char_device.*`, `device_object.h` | [docs/platform.md](docs/platform.md)         |
+| Threads, user processes & locks   | `src/kernel/proc/`, `src/kernel/sched/`, `trap.*`, `tvec.S`, `concurrency/`, `src/uapi/`                      | [docs/scheduling.md](docs/scheduling.md)     |
 | Logging, panic, backtrace & tests | `src/kernel/console.*`, `panic.*`, `stacktrace.*`, `src/util/format.*`, `src/kernel/test/`, `src/tests/host/` | [docs/debug.md](docs/debug.md)               |
 | Runtime, ABI & build tools        | `src/libc/`, `src/kernel/cxx/`, `src/user/crt/`, `CMakeLists.txt`, `cmake/`, `tools/`, `pixi.toml`            | [docs/build.md](docs/build.md)               |
 
@@ -29,7 +29,7 @@ Defer detailed contracts to the docs above, but never violate these cross-cuttin
 - **Freestanding ABI.** Compiled with `-fno-exceptions -fno-rtti -nostdlib -nostartfiles -static`. No host libc, libstdc++, libgcc, libatomic, compiler-rt, or `std::terminate` implementation. Avoid non-trivial static destructors (`atexit`/`__cxa_atexit`) and new runtime/compiler-helper dependencies. Build knobs (`SEELE_*`) are injected by `CMakeLists.txt` via `-D` with no header fallback defaults.
 - **Address, memory & boot ordering.** Preserve `Paddr`/`Vaddr`/`phys_range` types and explicit ownership/lifetimes. Prefer static storage or driver arenas for permanent device objects over heap allocation. Shared kernel root PTEs freeze after `vm::k::init()`; the high-half heap is only valid after `vm::k::enable()`. Switching from boot context into `idle()` is one-way (boot stacks are freed there). DTB and the `platform`-owned `fdt::Tree` live for kernel lifetime; keep `fdt/` and `platform/` strictly below `drivers/` (no reverse includes).
 - **Hart model & hardware limits.** Kernel indexing (`cpus[]`, locks, boot stacks) uses dense `cpuid` stored in `tp` (boot hart = hardware hart 0 = `cpuid 0`), never sparse `hartid`. There is currently no cross-hart TLB shootdown and no floating-point register context save/restore.
-- **Concurrency & output locking.** Never sleep, yield, or schedule while holding a spinlock. Verify concurrency contracts before changing shared state, interrupts, page tables, or boot publication (`g_started`). Normal output lock order is `console` -> UART and UART IRQs take only the device lock; panic switches to lockless polling.
+- **Concurrency & output locking.** Never sleep, yield, or schedule while holding a spinlock. Verify concurrency contracts before changing shared state, interrupts, page tables, or boot publication (`g_started`). Kernel log output lock order is `console` -> `ConsoleSink` (UART); interactive `CharDevice` writes take `Mutex` -> device spinlock (releasing the spinlock before sleeping), UART IRQs take only the device spinlock, and panic switches to lockless polling.
 
 ## Environment, Commands & Formatting (Pixi-First)
 
