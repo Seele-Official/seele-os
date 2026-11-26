@@ -6,6 +6,7 @@
 #include "hart.h"
 #include "panic.h"
 #include "riscv.h"
+#include "proc/process.h"
 #include "proc/syscall.h"
 #include "sched/schedule.h"
 
@@ -127,12 +128,8 @@ extern "C" trap_scratch* usertrap(trap_frame* frame) {
                 tval,
                 frame->sstatus);
 
-            proc::thread* const current = mycpu()->current;
-            if(current != nullptr) {
-                current->fault_cause.store(cause, std::memory_order_release);
-                current->exit_code.store(-1, std::memory_order_release);
-            }
-            sched::exit_current();
+            SEELE_ASSERT(mycpu()->current != nullptr, "usertrap fault without current thread");
+            proc::exit_current_process(-1, cause);
         }
     }
 

@@ -33,8 +33,8 @@ thread* spawn_shell() noexcept {
         SEELE_PANIC("proc: failed to load embedded user shell ELF ({} bytes)", image.size());
     }
 
-    process* const shell_proc = make_proc(user_pt);
-    thread* const shell_thread = make_user_thread(shell_proc, loaded->entry, loaded->user_sp);
+    ProcessHandle shell_proc = make_proc(user_pt);
+    thread* const shell_thread = make_user_thread(shell_proc.get(), loaded->entry, loaded->user_sp);
 
     LOG_INFO("proc: spawned user shell (elf {} bytes, entry {:#018x}, usp {:#018x})",
              image.size(),

@@ -61,9 +61,10 @@ void yield() noexcept;
 // woken on an idle remote hart runs on that hart's next timer or external IRQ.
 void wake(proc::thread* thread) noexcept;
 
-// Permanently retire the current non-idle thread by transitioning it to
-// ThreadState::Exited and switching to the next ready thread (or idle). The
-// retired thread is never placed on ready/sleeping again and cannot be woken.
+// Retire the current non-idle thread and switch to the next ready thread (or
+// idle). The retired thread is parked in `mycpu()->dying_thread` (never placed
+// on ready/sleeping again) and immediately reclaimed by `proc::reap_dying()`
+// once execution lands on the target thread's stack.
 //
 // Requires local interrupts disabled and no spinlock held. Never returns.
 [[noreturn]] void exit_current() noexcept;

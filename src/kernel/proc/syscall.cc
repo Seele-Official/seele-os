@@ -1,6 +1,5 @@
 #include "proc/syscall.h"
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -14,7 +13,6 @@
 #include "mm/addr.h"
 #include "mm/vm.h"
 #include "proc/process.h"
-#include "sched/schedule.h"
 #include "uapi/syscall.h"
 
 namespace syscall {
@@ -112,18 +110,17 @@ constexpr size_t WRITE_STAGE_SIZE = 128;
     return static_cast<int64_t>(done);
 }
 
-[[noreturn]] void sys_exit(uint64_t status) noexcept {
+[[noreturn]] void sys_exit_group(uint64_t status) noexcept {
     proc::thread* const current = mycpu()->current;
-    SEELE_ASSERT(current != nullptr, "syscall: exit without current thread");
+    SEELE_ASSERT(current != nullptr && current->proc != nullptr,
+                 "syscall: exit_group without current thread or process");
 
     const auto code = static_cast<int64_t>(status);
-    current->exit_code.store(code, std::memory_order_release);
-    LOG_DEBUG("syscall: user thread {:#018x} exited with status {}",
-              to_uint64(vaddr(current)),
+    LOG_DEBUG("syscall: user process {:#018x} exited with status {}",
+              to_uint64(vaddr(current->proc)),
               code);
 
-    riscv::intr_off();
-    sched::exit_current();
+    proc::exit_current_process(code);
 }
 
 [[nodiscard]] int64_t sys_shutdown(uint64_t code) noexcept {
@@ -142,7 +139,7 @@ void dispatch(trap::trap_frame* frame) noexcept {
     switch(frame->a7) {
         case uapi::sys::READ: result = sys_read(frame->a0, frame->a1, frame->a2); break;
         case uapi::sys::WRITE: result = sys_write(frame->a0, frame->a1, frame->a2); break;
-        case uapi::sys::EXIT: sys_exit(frame->a0);
+        case uapi::sys::EXIT_GROUP: sys_exit_group(frame->a0);
         case uapi::sys::SHUTDOWN: result = sys_shutdown(frame->a0); break;
         default:
             LOG_WARN("syscall: unknown number {} at sepc={:#018x}", frame->a7, frame->sepc - 4);

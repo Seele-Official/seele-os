@@ -22,6 +22,7 @@ add_executable(kernel
     stacktrace.cc
     concurrency/spinlock.cc
     concurrency/wait_queue.cc
+    concurrency/latch.cc
     concurrency/mutex.cc
     concurrency/semaphore.cc
     fdt/fdt.cc

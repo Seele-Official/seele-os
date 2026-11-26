@@ -17,8 +17,11 @@
 #include <cstddef>
 #include <type_traits>
 
-#include "proc/process.h"
 #include "util/list.h"
+
+namespace proc {
+struct thread;
+}
 
 class WaitQueue {
 public:

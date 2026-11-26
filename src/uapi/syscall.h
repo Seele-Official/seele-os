@@ -15,9 +15,11 @@ namespace uapi {
 namespace sys {
 
 // Linux RISC-V asm-generic standard syscall numbers.
+// EXIT_GROUP (94) terminates the whole process; 93 (Linux per-thread exit) is
+// reserved if per-thread exit is introduced later.
 inline constexpr uint64_t READ = 63;
 inline constexpr uint64_t WRITE = 64;
-inline constexpr uint64_t EXIT = 93;
+inline constexpr uint64_t EXIT_GROUP = 94;
 
 // seele-os custom extension range (>= 1000, outside Linux asm-generic).
 inline constexpr uint64_t SHUTDOWN = 1000;

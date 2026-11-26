@@ -4,6 +4,7 @@
 
 #include "hart.h"
 #include "riscv.h"
+#include "concurrency/latch.h"
 #include "concurrency/lock_guard.h"
 #include "concurrency/mutex.h"
 #include "concurrency/semaphore.h"
@@ -201,6 +202,80 @@ KTEST_SMP_CASE(sync, smp_semaphore_handoff) {
         }
     }
 
+    ktest::barrier();
+}
+
+KTEST_CASE(sync, latch_basic) {
+    Latch zero{0};
+    KTEST_EXPECT(zero.try_wait());
+    zero.wait();
+    zero.arrive_and_wait(0);
+    KTEST_EXPECT(riscv::is_intr_on());
+    KTEST_EXPECT_EQ(mycpu()->interrupt_depth, uint32_t{0});
+
+    Latch counter{3};
+    KTEST_EXPECT(!counter.try_wait());
+    counter.count_down();
+    KTEST_EXPECT(!counter.try_wait());
+    counter.count_down(0);
+    KTEST_EXPECT(!counter.try_wait());
+    counter.count_down(2);
+    KTEST_EXPECT(counter.try_wait());
+    // Repeated wait() calls return immediately once the latch has opened.
+    counter.wait();
+    counter.wait();
+    KTEST_EXPECT(riscv::is_intr_on());
+    KTEST_EXPECT_EQ(mycpu()->interrupt_depth, uint32_t{0});
+}
+
+Latch* g_smp_broadcast_latch = nullptr;
+Latch* g_smp_arrive_latch = nullptr;
+std::atomic<uint64_t> g_smp_latch_payload{0};
+std::atomic<size_t> g_smp_latch_waiters_ready{0};
+
+KTEST_SMP_CASE(sync, smp_latch_broadcast_and_arrive) {
+    const size_t harts = ktest::hart_count();
+
+    if(cpuid() == 0) {
+        g_smp_broadcast_latch = new Latch{1};
+        g_smp_arrive_latch = new Latch{harts};
+        g_smp_latch_payload.store(0, std::memory_order_relaxed);
+        g_smp_latch_waiters_ready.store(0, std::memory_order_relaxed);
+    }
+    ktest::barrier();
+
+    // Phase 1: one-shot broadcast wake from hart 0 to all secondary harts.
+    if(cpuid() == 0) {
+        while(g_smp_latch_waiters_ready.load(std::memory_order_acquire) < harts - 1) {}
+        const uint64_t release_at = riscv::csrr(riscv::registers::time) + 1000;
+        while(riscv::csrr(riscv::registers::time) < release_at) {}
+
+        g_smp_latch_payload.store(0x1a7c'0001ull, std::memory_order_relaxed);
+        g_smp_broadcast_latch->count_down();
+    } else {
+        KTEST_EXPECT(!g_smp_broadcast_latch->try_wait());
+        g_smp_latch_waiters_ready.fetch_add(1, std::memory_order_release);
+
+        g_smp_broadcast_latch->wait();
+        KTEST_EXPECT(g_smp_broadcast_latch->try_wait());
+        KTEST_EXPECT_EQ(g_smp_latch_payload.load(std::memory_order_relaxed), 0x1a7c'0001ull);
+        KTEST_EXPECT(riscv::is_intr_on());
+        KTEST_EXPECT_EQ(mycpu()->interrupt_depth, uint32_t{0});
+    }
+
+    // Phase 2: all harts synchronize via arrive_and_wait().
+    g_smp_arrive_latch->arrive_and_wait();
+    KTEST_EXPECT(g_smp_arrive_latch->try_wait());
+    KTEST_EXPECT(riscv::is_intr_on());
+    KTEST_EXPECT_EQ(mycpu()->interrupt_depth, uint32_t{0});
+
+    ktest::barrier();
+    if(cpuid() == 0) {
+        delete g_smp_broadcast_latch;
+        delete g_smp_arrive_latch;
+        g_smp_broadcast_latch = nullptr;
+        g_smp_arrive_latch = nullptr;
+    }
     ktest::barrier();
 }
 

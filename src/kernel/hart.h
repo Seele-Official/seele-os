@@ -50,6 +50,12 @@ struct cpu {
     // on every switch.
     proc::thread* current = nullptr;
 
+    // Exited thread awaiting immediate deferred reclamation on this hart once
+    // switch_thread() has moved execution onto the next thread's stack and
+    // address space. Written only by sched::exit_current() with SIE == 0 and
+    // consumed/cleared by proc::reap_dying().
+    proc::thread* dying_thread = nullptr;
+
     // Per-hart scratch area loaded into sscratch while executing in U-mode.
     // `kernel_tp` is initialized once per hart in kmain(); `kernel_sp` is
     // updated by tvecret before each return to U-mode.

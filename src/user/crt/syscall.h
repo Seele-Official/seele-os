@@ -44,7 +44,7 @@ inline int64_t ecall3(uint64_t number, uint64_t arg0, uint64_t arg1, uint64_t ar
 }
 
 [[noreturn]] inline void exit(int64_t status) noexcept {
-    (void)detail::ecall1(uapi::sys::EXIT, static_cast<uint64_t>(status));
+    (void)detail::ecall1(uapi::sys::EXIT_GROUP, static_cast<uint64_t>(status));
     while(true) {}
 }
 
