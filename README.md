@@ -77,4 +77,4 @@ seele>
 - [src/kernel/proc/](src/kernel/proc/) 与 [src/kernel/sched/](src/kernel/sched/)：进程、线程、ELF64 加载、系统调用与调度。
 - [src/uapi/](src/uapi/) 与 [src/user/](src/user/)：内核/用户共享系统调用 UAPI、用户态 CRT 与独立用户态 shell。
 - [src/util/](src/util/) 与 [src/libc/](src/libc/)：内核与用户态共享的 freestanding 格式化/编译期字符串工具与 C 字符串库；内核 C++ ABI 位于 [src/kernel/cxx/runtime.cc](src/kernel/cxx/runtime.cc)。
-- [tools/](tools/)：测试磁盘与 QEMU 启动脚本；[CMakeLists.txt](CMakeLists.txt) 负责内核构建。
+- [tools/](tools/)：测试磁盘与 QEMU 启动脚本；[CMakeLists.txt](CMakeLists.txt)、[cmake/](cmake/) 与各模块 `CMakeLists.txt` 负责内核、用户态与宿主机测试构建。

@@ -53,11 +53,13 @@ pixi run disk                      # 单独重建 build/disk.img
 - `qemu` 与 `test-kernel` 会自动执行 `setup`、`build` 与 `disk`。`disk` 会覆盖目标 `disk.img`，请勿存放持久化数据。
 - `pixi run clean <buildDir>` 递归删除目标目录，执行前须确认路径。
 
-| 工具           | 职责                                                        | 入口                                                                           |
-| -------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| Pixi           | 依赖与任务编排                                              | [pixi.toml](../pixi.toml)                                                      |
-| CMake + Ninja  | 编译、汇编、链接 `kernel.elf`，导出 `compile_commands.json` | [CMakeLists.txt](../CMakeLists.txt)、[CMakePresets.json](../CMakePresets.json) |
-| TypeScript CLI | 生成 1 MiB 测试磁盘、启动 QEMU                              | [tools/cli.ts](../tools/cli.ts)                                                |
+| 工具           | 职责                                                                   | 入口                                                                                                |
+| -------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Pixi           | 依赖与任务编排                                                         | [pixi.toml](../pixi.toml)                                                                           |
+| CMake + Ninja  | 编译、汇编、链接 `kernel.elf` 与用户程序，导出 `compile_commands.json` | [CMakeLists.txt](../CMakeLists.txt)、[CMakePresets.json](../CMakePresets.json)、[cmake/](../cmake/) |
+| TypeScript CLI | 生成 1 MiB 测试磁盘、启动 QEMU                                         | [tools/cli.ts](../tools/cli.ts)                                                                     |
+
+CMake 构建按模块拆分：根 [CMakeLists.txt](../CMakeLists.txt) 定义工具链检查、共享编译选项 `seele_freestanding_options` 并分发子目录；[cmake/KernelConfig.cmake](../cmake/KernelConfig.cmake) 管理内核 `SEELE_*` 配置与校验；各子模块目标分别定义在 [src/libc/CMakeLists.txt](../src/libc/CMakeLists.txt)、[src/util/CMakeLists.txt](../src/util/CMakeLists.txt)、[src/user/CMakeLists.txt](../src/user/CMakeLists.txt)、[src/kernel/CMakeLists.txt](../src/kernel/CMakeLists.txt) 与 [src/tests/host/CMakeLists.txt](../src/tests/host/CMakeLists.txt)。
 
 ### Release 与 Debug
 
@@ -79,7 +81,7 @@ pixi run qemu 1 build-debug
 
 ## 3. 构建参数
 
-所有 `SEELE_*` 参数由 [CMakeLists.txt](../CMakeLists.txt) 定义并通过 `-D` 同步注入 C++ 与汇编，头文件不设默认值以保证布局一致：
+所有 `SEELE_*` 参数由 [CMakeLists.txt](../CMakeLists.txt)（架构/ABI/代码模型）与 [cmake/KernelConfig.cmake](../cmake/KernelConfig.cmake)（内核配置与校验）定义并通过 `-D` 同步注入 C++ 与汇编，头文件不设默认值以保证布局一致：
 
 | 变量                         | 默认值                            | 含义                                             |
 | ---------------------------- | --------------------------------- | ------------------------------------------------ |
@@ -144,7 +146,7 @@ pixi run build
 
 ### 用户态程序与 `#embed` 构建流水线
 
-用户态程序（当前为 `user_shell`，源码位于 [src/user/shell/main.cc](../src/user/shell/main.cc)）使用与内核一致的 freestanding RV64GC/lp64d 编译选项，链接静态库 `seele_user_crt`（[start.S](../src/user/crt/start.S) + [io.cc](../src/user/crt/io.cc) + [runtime.cc](../src/user/crt/runtime.cc) + 共享静态库 `seele_string` 与 `seele_util`）与用户态链接脚本 [src/user/linker.ld](../src/user/linker.ld)（基址 `0x0000002000010000`，W^X 分段），产物为 `<buildDir>/user/shell.elf`（保留 `-g` 调试符号）。随后 `riscv64-unknown-elf-objcopy --strip-all` 生成裁剪镜像 `<buildDir>/user/shell.stripped.elf`，由 [src/kernel/proc/shell.cc](../src/kernel/proc/shell.cc) 通过 C++26 `#embed`（配合 `--embed-dir` 与 `OBJECT_DEPENDS`）直接嵌入内核 `.rodata`。
+用户态构建定义在 [src/user/CMakeLists.txt](../src/user/CMakeLists.txt)（通过 `seele_add_user_executable` 统一声明用户可执行文件及其裁剪产物）。当前用户程序为 `user_shell`（源码位于 [src/user/shell/main.cc](../src/user/shell/main.cc)），使用与内核一致的 freestanding RV64GC/lp64d 编译选项（`seele_freestanding_options`），链接静态库 `seele_user_crt`（[start.S](../src/user/crt/start.S) + [io.cc](../src/user/crt/io.cc) + [runtime.cc](../src/user/crt/runtime.cc) + 共享静态库 `seele_string` 与 `seele_util`）与用户态链接脚本 [src/user/linker.ld](../src/user/linker.ld)（基址 `0x0000002000010000`，W^X 分段），产物为 `<buildDir>/user/shell.elf`（保留 `-g` 调试符号）。随后 `riscv64-unknown-elf-objcopy --strip-all` 生成裁剪镜像 `<buildDir>/user/shell.stripped.elf`，由 [src/kernel/CMakeLists.txt](../src/kernel/CMakeLists.txt) 关联 `user_shell_embed` 目标与依赖属性，供 [src/kernel/proc/shell.cc](../src/kernel/proc/shell.cc) 通过 C++26 `#embed`（配合 `--embed-dir` 与 `OBJECT_DEPENDS`）直接嵌入内核 `.rodata`。
 
 ### 标准头文件与编译器 helper 边界
 
@@ -155,7 +157,7 @@ pixi run build
 
 ## 5. 新增运行时依赖验证流程
 
-1. 明确新增符号归属（头文件、libc、C++ ABI 或编译器 helper）；新增 libc 源文件须加入 CMake `seele_libc` 目标。
+1. 明确新增符号归属（头文件、libc、C++ ABI 或编译器 helper）；新增 libc 源文件须加入 [src/libc/CMakeLists.txt](../src/libc/CMakeLists.txt) 中的 `seele_libc`（或共享层 `seele_string`）目标。
 2. 在内核实际调用路径中编译并覆盖失败分支。
 3. 构建 Release 与 Debug，核对最终 ELF 无未定义符号（两次 `nm -u` 均应无输出）：
 
