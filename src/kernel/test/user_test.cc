@@ -132,6 +132,14 @@ KTEST_CASE(user, umode_syscalls_and_exit) {
     constexpr int32_t MSG_LEN = static_cast<int32_t>(sizeof(MSG) - 1);
     memcpy(data_dst, MSG, sizeof(MSG) - 1);
 
+    // Payload exceeding Ns16550's 128-byte TX ring and syscall's 128-byte
+    // staging chunk to exercise schedulable blocking write from U-mode.
+    constexpr int32_t BULK_OFFSET = 128;
+    constexpr int32_t BULK_LEN = 260;
+    memset(data_dst + BULK_OFFSET, '=', BULK_LEN - 1);
+    memcpy(data_dst + BULK_OFFSET, "[ktest-user-bulk] ", 18);
+    data_dst[BULK_OFFSET + BULK_LEN - 1] = '\n';
+
     constexpr Vaddr CODE_VA = vm::u::USER_BASE + 0x10000;
     constexpr Vaddr DATA_VA = vm::u::USER_BASE + 0x20000;
     constexpr Vaddr STACK_PAGE_VA = vm::u::USER_STACK_TOP - riscv::PGSIZE;
@@ -142,6 +150,7 @@ KTEST_CASE(user, umode_syscalls_and_exit) {
     //   [72(s1)] = write(9, s1, 4)                   -> expected err::BADF
     //   [80(s1)] = write(STDOUT_FD, 0x10000000, 4)   -> expected err::FAULT
     //   [88(s1)] = syscall(777)                      -> expected err::NOSYS
+    //   [96(s1)] = write(STDOUT_FD, s1 + 128, 260)   -> expected BULK_LEN
     //   exit(42)
     const uint32_t prog[] = {
         rv_auipc(S1, 0x10),
@@ -172,6 +181,13 @@ KTEST_CASE(user, umode_syscalls_and_exit) {
         RV_ECALL,
         rv_sd(A0, S1, 88),
 
+        rv_addi(A0, X0, static_cast<int32_t>(uapi::STDOUT_FD)),
+        rv_addi(A1, S1, BULK_OFFSET),
+        rv_addi(A2, X0, BULK_LEN),
+        rv_addi(A7, X0, static_cast<int32_t>(uapi::sys::WRITE)),
+        RV_ECALL,
+        rv_sd(A0, S1, 96),
+
         rv_addi(A0, X0, 42),
         rv_addi(A7, X0, static_cast<int32_t>(uapi::sys::EXIT)),
         RV_ECALL,
@@ -197,12 +213,13 @@ KTEST_CASE(user, umode_syscalls_and_exit) {
     KTEST_EXPECT_EQ(uthread->exit_code.load(std::memory_order_acquire), int64_t{42});
     KTEST_EXPECT_EQ(uthread->fault_cause.load(std::memory_order_acquire), uint64_t{0});
 
-    int64_t results[4]{};
+    int64_t results[5]{};
     KTEST_ASSERT(vm::u::copy_from_user(pt, results, DATA_VA + 64, sizeof(results)));
     KTEST_EXPECT_EQ(results[0], static_cast<int64_t>(MSG_LEN));
     KTEST_EXPECT_EQ(results[1], uapi::err::BADF);
     KTEST_EXPECT_EQ(results[2], uapi::err::FAULT);
     KTEST_EXPECT_EQ(results[3], uapi::err::NOSYS);
+    KTEST_EXPECT_EQ(results[4], static_cast<int64_t>(BULK_LEN));
 
     cleanup_exited_user_proc(uproc, uthread);
 }

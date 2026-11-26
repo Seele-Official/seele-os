@@ -6,7 +6,9 @@
 #include <string>
 #include <string_view>
 
+#include "char_device.h"
 #include "console.h"
+#include "console_sink.h"
 #include "device_object.h"
 #include "util/format.h"
 #include "util/static_str.h"
@@ -313,6 +315,110 @@ TEST(DeviceObjectTest, MultipleInheritanceDynCast) {
     EXPECT_EQ(device::dyn_cast<const BetaInterface>(const_obj)->beta(), 99);
     EXPECT_EQ(device::dyn_cast<UnimplementedInterface>(obj), nullptr);
     EXPECT_EQ(device::dyn_cast<AlphaInterface>(static_cast<device::Object*>(nullptr)), nullptr);
+}
+
+class SinkOnlyDevice final : public device::Implements<ConsoleSink> {
+public:
+    void write_sync(std::string_view data) noexcept override {
+        sync_out.append(data.data(), data.size());
+    }
+
+    void flush() noexcept override {
+        ++flush_count;
+    }
+
+    void write_emergency(std::string_view data) noexcept override {
+        emergency_out.append(data.data(), data.size());
+    }
+
+    void enter_panic() noexcept override {
+        panicked = true;
+    }
+
+    std::string sync_out;
+    std::string emergency_out;
+    int flush_count = 0;
+    bool panicked = false;
+};
+
+class CharOnlyDevice final : public device::Implements<CharDevice> {
+public:
+    [[nodiscard]] std::size_t read(std::span<char> buffer) noexcept override {
+        if(buffer.empty()) {
+            return 0;
+        }
+        buffer[0] = 'z';
+        return 1;
+    }
+
+    [[nodiscard]] std::size_t write(std::span<const char> data) noexcept override {
+        stream_out.append(data.data(), data.size());
+        return data.size();
+    }
+
+    std::string stream_out;
+};
+
+class DualConsoleDevice final : public device::Implements<ConsoleSink, CharDevice> {
+public:
+    void write_sync(std::string_view data) noexcept override {
+        sync_out.append(data.data(), data.size());
+    }
+
+    void flush() noexcept override {}
+
+    void write_emergency(std::string_view data) noexcept override {
+        emergency_out.append(data.data(), data.size());
+    }
+
+    void enter_panic() noexcept override {}
+
+    [[nodiscard]] std::size_t read(std::span<char> buffer) noexcept override {
+        if(buffer.empty()) {
+            return 0;
+        }
+        buffer[0] = 'x';
+        return 1;
+    }
+
+    [[nodiscard]] std::size_t write(std::span<const char> data) noexcept override {
+        stream_out.append(data.data(), data.size());
+        return data.size();
+    }
+
+    std::string sync_out;
+    std::string emergency_out;
+    std::string stream_out;
+};
+
+TEST(DeviceObjectTest, ConsoleSinkAndCharDeviceOrthogonal) {
+    SinkOnlyDevice sink_only{};
+    CharOnlyDevice char_only{};
+    DualConsoleDevice dual{};
+
+    EXPECT_NE(device::dyn_cast<ConsoleSink>(&sink_only), nullptr);
+    EXPECT_EQ(device::dyn_cast<CharDevice>(&sink_only), nullptr);
+
+    EXPECT_EQ(device::dyn_cast<ConsoleSink>(&char_only), nullptr);
+    EXPECT_NE(device::dyn_cast<CharDevice>(&char_only), nullptr);
+
+    auto* sink = device::dyn_cast<ConsoleSink>(&dual);
+    auto* chars = device::dyn_cast<CharDevice>(&dual);
+    ASSERT_NE(sink, nullptr);
+    ASSERT_NE(chars, nullptr);
+    EXPECT_NE(reinterpret_cast<void*>(sink), reinterpret_cast<void*>(chars));
+
+    sink->write_sync("log");
+    sink->write_emergency("panic");
+    const char payload[] = {'u', 's', 'e', 'r'};
+    EXPECT_EQ(chars->write(payload), std::size_t{4});
+    char rx = '\0';
+    EXPECT_EQ(chars->read(std::span<char>{&rx, 1}), std::size_t{1});
+
+    EXPECT_EQ(dual.sync_out, "log");
+    EXPECT_EQ(dual.emergency_out, "panic");
+    EXPECT_EQ(dual.stream_out, "user");
+    EXPECT_EQ(rx, 'x');
 }
 
 }  // namespace

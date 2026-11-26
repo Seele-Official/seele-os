@@ -16,6 +16,7 @@ add_executable(kernel
     power.cc
     trap.cc
     tvec.S
+    char_device.cc
     console.cc
     hart.cc
     stacktrace.cc

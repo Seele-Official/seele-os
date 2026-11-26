@@ -30,7 +30,7 @@
 # the write entirely -- and keeps the TLB warm.
 #
 # switch_thread is called from the trap path after a trap has been handled, and
-# from sched::sleep() when a thread parks itself (console::read() does). Both
+# from sched::sleep() when a thread parks itself (CharDevice::read()/write() do). Both
 # callers have interrupts disabled and hold no lock. Every access here is
 # a0/a1-relative, so nothing reads through the old sp once it changes.
 #

@@ -1,52 +1,51 @@
 #pragma once
 
-// Output sink and interactive character-device interfaces shared by the console
-// and its backends.
+// Schedulable bidirectional character-device interface and active console
+// character-device binding for interactive I/O (syscalls).
 //
-// Output and input are split cleanly into two layers:
-//   - `ConsoleSink`: output + panic hooks only. Implemented by polled early
-//     boot consoles (16550 UART, future OpenSBI debug console) that run before
-//     interrupts, locks, or the driver core exist.
-//   - `CharDevice`: extends `ConsoleSink` with blocking `read()`. Implemented
-//     by full drivers (e.g. Ns16550) discovered via `device::dyn_cast` and
-//     attached through `console::attach()`.
+// `CharDevice` is strictly orthogonal to `ConsoleSink` (console_sink.h):
+//   - `ConsoleSink` serves non-scheduling kernel log and lock-free panic paths.
+//   - `CharDevice` serves schedulable thread-context byte streams (`read` /
+//     `write` may sleep on wait queues until hardware interrupts make progress).
 //
-// The console owns line framing, lock ordering, and normal-vs-panic routing;
-// backends own hardware access, buffering, and (for CharDevice) blocking waits.
-// Backends never call back into the console.
+// Backends live in static storage or the driver arena and are never freed; the
+// binding below borrows the probed object pointer for the rest of the kernel.
 
 #include <cstddef>
+#include <span>
 
-class ConsoleSink {
+class CharDevice {
 public:
-    // Accept `count` bytes for transmission and return without scheduling.
-    // Callable from normal code, traps, interrupts, and early boot.
-    virtual void write(const char* data, std::size_t count) noexcept = 0;
+    // Schedulable thread-context read. Blocks until at least one input byte is
+    // available, then copies 1..buffer.size() currently available bytes and
+    // returns the byte count (0 if `buffer` is empty or panic is latched).
+    //
+    // Preconditions: current thread is non-idle, interrupts enabled (SIE = 1),
+    // and no spinlock held.
+    [[nodiscard]] virtual std::size_t read(std::span<char> buffer) noexcept = 0;
 
-    // Drain accepted bytes and wait until the transmitter is quiet. May take
-    // the device lock, so it must not be called from that device's own IRQ
-    // handler.
-    virtual void flush() noexcept = 0;
-
-    // Lock-free emergency output for panic(). Never takes locks or touches
-    // shared queues that a halted hart may have left locked.
-    virtual void write_polled(const char* data, std::size_t count) noexcept = 0;
-
-    // Mask device interrupts without taking locks so panic output is not
-    // disrupted by level-triggered IRQ storms.
-    virtual void enter_panic() noexcept = 0;
+    // Schedulable thread-context write. Enqueues all bytes in `data` for
+    // transmission, sleeping on backpressure until buffer space becomes
+    // available. Returns the number of bytes accepted (`data.size()`, or fewer
+    // if panic is latched mid-write).
+    //
+    // Preconditions: current thread is non-idle, interrupts enabled (SIE = 1),
+    // and no spinlock held.
+    [[nodiscard]] virtual std::size_t write(std::span<const char> data) noexcept = 0;
 
 protected:
-    // Backends live in static storage or the driver arena and are never freed.
-    ~ConsoleSink() = default;
-};
-
-class CharDevice : public ConsoleSink {
-public:
-    // Block until at least one input byte is available, then return it. Thread
-    // context only (interrupts enabled, no spinlock held).
-    [[nodiscard]] virtual char read() noexcept = 0;
-
-protected:
+    // Devices live in static storage or the driver arena and are never freed.
     ~CharDevice() = default;
 };
+
+namespace char_device {
+
+// Bind `device` as the active interactive console character device used by
+// user-space stdio syscalls until a VFS / per-process file descriptor table
+// exists. Called by the driver core when a probed object exposes `CharDevice`.
+void attach(CharDevice& device) noexcept;
+
+// Borrow the active interactive character device, or nullptr if none is bound.
+[[nodiscard]] CharDevice* active() noexcept;
+
+}  // namespace char_device

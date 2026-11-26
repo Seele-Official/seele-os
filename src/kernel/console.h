@@ -1,26 +1,29 @@
 #pragma once
 
-// Console output, logging, and input dispatch.
+// Synchronous kernel console output: logging, formatted printing, and panic
+// emergency diagnostics.
 //
 // - Formatting: print()/println()/LOG_* validate literal format strings at
 //   compile time via util/format.h; vprint()/vprintln() parse runtime
 //   string_views with the same grammar via vformat_to().
-// - Normal output: serialized per line under the console spinlock and submitted
-//   in chunks to the attached ConsoleSink without scheduling (safe in boot,
-//   trap, and interrupt contexts; full TX queues drain by polling). Dropped
-//   once panic mode is latched so surviving harts do not clutter crash output.
-// - Emergency output: print_emergency()/println_emergency()/vprint_emergency()
-//   always bypass locks and write straight to ConsoleSink::write_polled(), so
-//   panic() and stacktrace::print() cannot deadlock on console or device locks.
-// - Input: read() forwards locklessly to the attached CharDevice (char_device.h)
-//   so blocking waits never hold the console lock.
+// - Log / normal output (Path 2): serialized per call under the console
+//   spinlock and transmitted synchronously in chunks via
+//   ConsoleSink::write_sync() without scheduling (safe in early boot, normal
+//   threads, traps, and non-reentrant interrupts). Dropped once panic mode is
+//   latched so surviving harts do not clutter crash output.
+// - Emergency output (Path 1): print_emergency()/println_emergency()/
+//   vprint_emergency() always bypass locks and write straight to
+//   ConsoleSink::write_emergency(), so panic() and stacktrace::print() cannot
+//   deadlock on console or device locks.
+// - Interactive syscall I/O (Path 3) is separate and runs directly against the
+//   schedulable `CharDevice` interface (char_device.h).
 
 #include <cstddef>
 #include <cstdint>
 #include <source_location>
 #include <string_view>
 
-#include "char_device.h"
+#include "console_sink.h"
 #include "util/format.h"
 
 // The unchecked layer: the caller guarantees that fmt is well formed and that
@@ -58,36 +61,22 @@ enum class Level : uint8_t {
     return std::string_view{file.data() + slash + 1, file.size() - slash - 1};
 }
 
-// Make `device` both the console's output sink and its input source. Called by
-// the driver core when a probed object exposes `CharDevice` through
+// Install `sink` as the active synchronous console output backend. Called by
+// the driver core when a probed object exposes `ConsoleSink` through
 // `device::dyn_cast`. Flushes any previous sink under the console lock before
 // handing over so early-to-driver transition preserves output order.
-void attach(CharDevice& device) noexcept;
+void attach(ConsoleSink& sink) noexcept;
 
 // Lockless boot-time output attachment for the early platform console
-// (platform/early_console.h). Installs an output-only `ConsoleSink` before
-// locks, interrupts, or other harts exist; does not enable `console::read()`.
+// (platform/early_console.h). Installs a polled `ConsoleSink` before locks,
+// interrupts, or other harts exist.
 void attach_boot(ConsoleSink& sink) noexcept;
 
 // Whether an output sink (early or full driver) is attached.
 [[nodiscard]] bool attached() noexcept;
 
-// Whether an interactive input-capable `CharDevice` is attached. Callers such
-// as shell startup check this rather than `attached()`, so an output-only early
-// console (such as OpenSBI debug console) never starts a reader that cannot
-// block on input.
-[[nodiscard]] bool can_read() noexcept;
-
-// Block until the attached CharDevice delivers one byte. Thread context only
-// (current thread, interrupts enabled, no spinlock held, single waiter). Takes
-// no console lock; panics if no readable CharDevice is attached.
-[[nodiscard]] char read() noexcept;
-
-// Write raw bytes directly to the attached ConsoleSink under the console lock
-// without format-string parsing. Drops output once panic mode is latched.
-void write(std::string_view data) noexcept;
-
-// Drain all accepted output to the attached ConsoleSink by polling until quiet.
+// Drain all pending output on the attached ConsoleSink (including any buffered
+// async CharDevice TX on a shared UART) and wait until hardware is quiet.
 // Takes console + device locks (never schedules). No-op once panic is latched.
 void flush() noexcept;
 
@@ -97,8 +86,8 @@ void flush() noexcept;
 void enter_panic() noexcept;
 
 // Lock-free emergency output for panic() and stacktrace::print(). Always writes
-// directly via ConsoleSink::write_polled() without touching console or device
-// locks.
+// directly via ConsoleSink::write_emergency() without touching console or
+// device locks.
 void vprint_emergency(std::string_view fmt, format_args args) noexcept;
 void vprintln_emergency(std::string_view fmt, format_args args) noexcept;
 

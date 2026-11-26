@@ -80,9 +80,9 @@ void warn_unhandled_source(uint32_t irq) noexcept {
 // kernel preempts a thread or resumes one an interrupt woke. (A thread can also
 // give the hart away on purpose, in sched::sleep().) Both interrupt causes the
 // kernel handles are scheduling points: the timer preempts the running thread
-// (sched::schedule), and an external interrupt may have woken one -- the console's
-// receive interrupt wakes a reader parked in console::read() -- so it schedules
-// too. Exceptions never schedule.
+// (sched::schedule), and an external interrupt may have woken one -- the UART
+// receive/transmit interrupt wakes threads parked in CharDevice::read()/write()
+// -- so it schedules too. Exceptions never schedule.
 
 // Traps that arrived from user mode: tvec.S's sscratch != 0 path, which
 // switched to this thread's kernel stack, built a 272-byte trap_frame there,
@@ -161,8 +161,8 @@ extern "C" void kerneltrap(trap_frame* frame) {
         }
         case csr::scause::EXT_INT: {
             service_external();
-            // An interrupt may have woken a thread -- the console's receive
-            // interrupt is what resumes a reader parked in console::read(). The
+            // An interrupt may have woken a thread -- UART RX/TX interrupts are
+            // what resume threads parked in CharDevice::read()/write(). The
             // woken thread belongs to this hart's ready list, so switching here
             // returns to it now instead of leaving it until the next timer tick,
             // which is the difference between an echo within microseconds and one

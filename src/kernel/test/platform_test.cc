@@ -1,10 +1,13 @@
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string.h>
 
 #include "char_device.h"
 #include "console.h"
+#include "console_sink.h"
 #include "device_object.h"
+#include "hart.h"
 #include "power.h"
 #include "trap.h"
 #include "platform/device.h"
@@ -20,9 +23,11 @@ KTEST_CASE(platform, boot_topology_and_drivers) {
     KTEST_EXPECT(!info.harts().empty());
     KTEST_EXPECT(info.timebase_frequency() > 0);
     KTEST_EXPECT(console::attached());
+    KTEST_EXPECT(char_device::active() != nullptr);
     KTEST_EXPECT(power::can_poweroff());
 
     bool found_irq_controller = false;
+    bool found_console_sink = false;
     bool found_char_device = false;
     bool found_power_device = false;
 
@@ -34,18 +39,66 @@ KTEST_CASE(platform, boot_topology_and_drivers) {
             found_irq_controller = true;
             KTEST_EXPECT_EQ(device::dyn_cast<PowerDevice>(dev.object()), nullptr);
         }
+        if(device::dyn_cast<ConsoleSink>(dev.object()) != nullptr) {
+            found_console_sink = true;
+        }
         if(device::dyn_cast<CharDevice>(dev.object()) != nullptr) {
             found_char_device = true;
         }
         if(device::dyn_cast<PowerDevice>(dev.object()) != nullptr) {
             found_power_device = true;
+            KTEST_EXPECT_EQ(device::dyn_cast<ConsoleSink>(dev.object()), nullptr);
             KTEST_EXPECT_EQ(device::dyn_cast<CharDevice>(dev.object()), nullptr);
         }
     }
 
     KTEST_EXPECT(found_irq_controller);
+    KTEST_EXPECT(found_console_sink);
     KTEST_EXPECT(found_char_device);
     KTEST_EXPECT(found_power_device);
+}
+
+KTEST_CASE(platform, char_device_blocking_write) {
+    CharDevice* const dev = char_device::active();
+    KTEST_ASSERT(dev != nullptr);
+
+    // Exceed Ns16550's 128-byte TX ring so this exercises the WaitQueue sleep
+    // and UART TX-empty IRQ wakeup path end to end.
+    constexpr size_t PAYLOAD_SIZE = 320;
+    char payload[PAYLOAD_SIZE]{};
+    memset(payload, '.', PAYLOAD_SIZE - 1);
+    memcpy(payload, "[ktest-char] ", 13);
+    payload[PAYLOAD_SIZE - 1] = '\n';
+
+    KTEST_EXPECT_EQ(dev->write(std::span<const char>{payload, PAYLOAD_SIZE}), PAYLOAD_SIZE);
+}
+
+KTEST_SMP_CASE(platform, smp_log_and_char_write) {
+    CharDevice* const dev = char_device::active();
+    KTEST_ASSERT(dev != nullptr);
+
+    ktest::barrier();
+
+    if(cpuid() == 0) {
+        constexpr size_t PAYLOAD_SIZE = 256;
+        char payload[PAYLOAD_SIZE]{};
+        memset(payload, '-', PAYLOAD_SIZE - 1);
+        memcpy(payload, "[ktest-smp-char] ", 17);
+        payload[PAYLOAD_SIZE - 1] = '\n';
+
+        for(int round = 0; round < 3; ++round) {
+            KTEST_EXPECT_EQ(dev->write(std::span<const char>{payload, PAYLOAD_SIZE}), PAYLOAD_SIZE);
+        }
+    } else {
+        // Concurrent synchronous kernel logs drain Ns16550's async TX ring
+        // under console::g_lock -> m_lock while keeping IER_TX_EMPTY armed for
+        // any blocked writer on hart 0.
+        for(int round = 0; round < 3; ++round) {
+            LOG_DEBUG("ktest: smp sync log hart {} round {}", cpuid(), round);
+        }
+    }
+
+    ktest::barrier();
 }
 
 KTEST_CASE(platform, libc_string_primitives) {

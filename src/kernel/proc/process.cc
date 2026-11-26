@@ -37,10 +37,6 @@ bool g_kernel_process_ready = false;
     cpu* const hart = mycpu();
     SEELE_ASSERT(hart->current != nullptr, "proc: user trampoline without current thread");
 
-    // Flush queued kernel logs before entering U-mode so initial user output
-    // does not overtake preceding boot/scheduler lines.
-    console::flush();
-
     const Vaddr kstack_top = hart->current->kstack.base + hart->current->kstack.size;
     auto* const frame = to_pointer<trap::trap_frame>(kstack_top - sizeof(trap::trap_frame));
     trap::enter_user(frame, &hart->trap_scratch);

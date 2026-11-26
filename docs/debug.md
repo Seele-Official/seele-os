@@ -7,7 +7,7 @@
 [console.h](../src/kernel/console.h) 提供 `print()` / `println()` 与 `LOG_DEBUG`、`LOG_INFO`、`LOG_WARN`、`LOG_ERR`。日志无运行期级别过滤，Release 同样编译执行。
 
 - **格式检查与输出引擎**：核心格式化实现位于共享模块 [src/util/format.h](../src/util/format.h) / [src/util/format.cc](../src/util/format.cc)（内核与用户态共用），提供 `format_to()` / `vformat_to()`（支持自定义 `FormatSink` 与定长 `std::span<char>` 缓冲区）。字面量格式串由 `consteval` 在编译期验证占位符数量、参数类型与格式说明符兼容性；运行期格式串经 `vformat_to()` / `vprint()` / `vprintln()` 解析，非法占位符按原文本输出。支持 `{{`/`}}` 转义、整数（`d`/`x`/`X`/`b`/`B`/`o`，含 `+`/`-`/` ` 符号、`#` 前缀与零填充）、`char`（默认/`c` 或整数进制）、`bool`、可转为 `std::string_view` 的字符串、无类型指针（`void*`/`const void*`/`nullptr`，默认/`p`/`P` 及零填充），以及通用填充字符、对齐（`<`/`>`/`^`）与最大 255 宽度。
-- **输出行为**：单次 `print()` / `println()` / `LOG_*` 在 console 锁内完成格式化，按 64 字节 staging 块写入 [`ConsoleSink::write()`](../src/kernel/char_device.h)，不会被其他正常写者打断；多次调用拼成的行不合并加锁。输出路径不调度，可用于启动代码、trap 与中断上下文（未挂接 sink 时丢弃）。队列背压与锁序细节见 [platform.md](platform.md)。
+- **输出行为**：单次 `print()` / `println()` / `LOG_*` 在 console 锁内完成格式化，按 64 字节 staging 块同步写入 [`ConsoleSink::write_sync()`](../src/kernel/console_sink.h)，不会被其他正常写者打断；多次调用拼成的行不合并加锁。输出路径不调度且直接同步落至硬件，可用于启动代码、trap 与中断上下文（未挂接 sink 时丢弃）。与异步 `CharDevice` 的保序与锁序细节见 [platform.md](platform.md)。
 
 ## Assert、Panic 与停机
 
@@ -33,7 +33,7 @@ stack trace:
   ...
 ```
 
-panic 入口先关闭本 hart 的 `sstatus.SIE`（防止定时器或外部中断在报告过程中切走当前线程与栈），再调用 `console::enter_panic()` 屏蔽设备中断并使常规日志静默丢弃；随后 `panic()` 与 `stacktrace::print()` 通过专用无锁紧急输出通道（`console::print_emergency()` / `println_emergency()` → `ConsoleSink::write_polled()`）直接轮询输出，使已持锁代码、trap、中断及早期启动路径均可报告现场。默认构建下报告完成后清空 `sie` 并循环 `wfi()` 停住当前 hart（不自动停止其他 hart）；启用 `SEELE_TESTS` 的测试构建下会先调用 `power::poweroff_emergency(1)` 使 QEMU 以非零退出码终止。
+panic 入口先关闭本 hart 的 `sstatus.SIE`（防止定时器或外部中断在报告过程中切走当前线程与栈），再调用 `console::enter_panic()` 屏蔽设备中断并使常规日志静默丢弃；随后 `panic()` 与 `stacktrace::print()` 通过专用无锁紧急输出通道（`console::print_emergency()` / `println_emergency()` → `ConsoleSink::write_emergency()`）直接轮询输出，使已持锁代码、trap、中断及早期启动路径均可报告现场。默认构建下报告完成后清空 `sie` 并循环 `wfi()` 停住当前 hart（不自动停止其他 hart）；启用 `SEELE_TESTS` 的测试构建下会先调用 `power::poweroff_emergency(1)` 使 QEMU 以非零退出码终止。
 
 [src/libc/stdlib.cc](../src/libc/stdlib.cc) 将 `abort()` 转发为 `panic("abort() called")`。Debug 构建启用 `_GLIBCXX_ASSERTIONS`，freestanding libstdc++ 前置条件失败（如空 `optional`/`expected` 或 `std::get()`）会经此路径停机。内核代码统一使用 `SEELE_UNREACHABLE()` 替代会产生 UB 的 `std::unreachable()`。
 

@@ -5,7 +5,7 @@
 //
 // Deliberately lives in `platform/` with no dependency on `drivers/`: formal
 // drivers sit above `platform/`, whereas this stage only needs synchronous
-// polled output for early diagnostics and panics until a full `CharDevice`
+// polled output for early diagnostics and panics until a full `ConsoleSink`
 // driver takes over via `console::attach()`.
 //
 // Future OpenSBI support plugs directly into this layer as a sibling

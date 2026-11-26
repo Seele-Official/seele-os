@@ -10,7 +10,9 @@
 #include <cstdint>
 #include <span>
 
+#include "char_device.h"
 #include "console.h"
+#include "console_sink.h"
 #include "power.h"
 #include "trap.h"
 #include "platform/device.h"
@@ -73,8 +75,11 @@ void wire_device(device::Object& object) noexcept {
     if(auto* controller = device::dyn_cast<trap::ExternalController>(&object)) {
         trap::set_external_controller(*controller);
     }
+    if(auto* sink = device::dyn_cast<ConsoleSink>(&object)) {
+        console::attach(*sink);
+    }
     if(auto* chars = device::dyn_cast<CharDevice>(&object)) {
-        console::attach(*chars);
+        char_device::attach(*chars);
     }
     if(auto* pwr = device::dyn_cast<PowerDevice>(&object)) {
         power::attach(*pwr);

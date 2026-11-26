@@ -14,7 +14,7 @@ namespace sched {
 // into satp (with a TLB flush); a same-process switch leaves satp alone.
 //
 // Called from the trap path, and from a thread that parks itself in sched::sleep()
-// (which is how console::read() blocks). Both callers switch with interrupts
+// (which is how CharDevice::read()/write() block). Both callers switch with interrupts
 // disabled and no lock held: switch_thread() is an ordinary call, so the
 // compiler has spilled whatever the caller still needs, and this routine saves
 // the rest of the callee-saved state per thread.

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string.h>
 
+#include "char_device.h"
 #include "console.h"
 #include "hart.h"
 #include "panic.h"
@@ -126,10 +127,10 @@ extern "C" [[noreturn]] void kmain(uint64_t hartid, Paddr dtb) {
 #if SEELE_TESTS
         sched::enqueue(proc::make_thread(proc::kernel_proc(), &ktest::runner_entry));
 #else
-        // Spawn the embedded user-mode shell process when a readable console
-        // device is attached; an output-only early sink leaves this hart
-        // running idle silently.
-        if(console::can_read()) {
+        // Spawn the embedded user-mode shell process when an interactive
+        // character device is attached; an output-only early sink leaves this
+        // hart running idle silently.
+        if(char_device::active() != nullptr) {
             sched::enqueue(proc::spawn_shell());
         }
 #endif

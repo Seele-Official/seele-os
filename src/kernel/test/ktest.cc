@@ -244,7 +244,6 @@ void Context::fail_binary(const char* op,
 
 [[noreturn]] void runner_entry() {
     riscv::intr_on();
-    console::flush();
 
     const size_t online_harts = wait_for_workers();
     const std::span<const test_case> cases = registered_cases();

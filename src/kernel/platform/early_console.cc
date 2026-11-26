@@ -10,8 +10,8 @@
 #include <cstdint>
 #include <string_view>
 
-#include "char_device.h"
 #include "console.h"
+#include "console_sink.h"
 #include "platform/mmio.h"
 #include "platform/ns16550_hw.h"
 
@@ -36,20 +36,17 @@ public:
         return true;
     }
 
-    void write(const char* data, std::size_t count) noexcept override {
-        write_polled(data, count);
+    void write_sync(std::string_view data) noexcept override {
+        write_emergency(data);
     }
 
     void flush() noexcept override {
         m_port.wait_tx_empty();
     }
 
-    void write_polled(const char* data, std::size_t count) noexcept override {
-        if(data == nullptr) {
-            return;
-        }
-        for(std::size_t i = 0; i < count; ++i) {
-            m_port.putc_polled(data[i]);
+    void write_emergency(std::string_view data) noexcept override {
+        for(char c: data) {
+            m_port.putc_polled(c);
         }
     }
 

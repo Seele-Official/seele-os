@@ -47,17 +47,17 @@ libc + cxx                            freestanding 运行时支持
 
 ### boot hart
 
-| 阶段           | 动作                                                                                                                                     | 完成后满足的前置条件                                 |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| 汇编入口       | [boot/start.S](../src/kernel/boot/start.S) 分配 boot 栈，将 `cpuid = 0` 写入 `tp`                                                        | 具备可用栈，全局 C++ 对象尚未构造                    |
-| M-mode 交接    | [boot/start.cc](../src/kernel/boot/start.cc) 配置机器状态，以 `satp = 0` 进入 S-mode                                                     | 可在无分页状态下访问物理 RAM 与 MMIO                 |
-| 早期发现       | 清 `.bss`、`cxx::init()` 执行 `.init_array`，`platform::init()` 绑定 DTB 并挂接 early console                                            | DTB 可查询；early console 就绪时可输出后续日志       |
-| 平台描述       | `platform::init()` 枚举设备并解析内存/保留区、hart、timebase 与 `/chosen`                                                                | 平台拓扑与设备资源表只读就绪                         |
-| 分页准备       | `phymem::init()`、`vm::k::init()`                                                                                                        | 物理页可分配，共享内核根表（含堆与内核栈子树）已建立 |
-| 启用分页       | `vm::k::enable(vm::k::pagetable())`                                                                                                      | 高位内核堆与共享线程栈窗口可访问                     |
-| 内核对象       | `proc::init()` 建立全局唯一系统进程，创建 boot hart 的 `idle` 线程并分配其内核栈槽                                                       | 具备系统进程与可切入的线程上下文                     |
-| 驱动与入口线程 | 按级别 probe 驱动；默认构建在 `console::can_read()` 为真时加载 `#embed` 的 ELF64 `shell` 并入队 U-mode 线程，测试构建入队 `ktest` 运行器 | 外部中断与关机设备就绪，初始线程集固定               |
-| 发布与切换     | release 发布 `g_started`，单向切入 idle                                                                                                  | secondary 可继续初始化；boot 上下文不再恢复          |
+| 阶段           | 动作                                                                                                                                              | 完成后满足的前置条件                                 |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| 汇编入口       | [boot/start.S](../src/kernel/boot/start.S) 分配 boot 栈，将 `cpuid = 0` 写入 `tp`                                                                 | 具备可用栈，全局 C++ 对象尚未构造                    |
+| M-mode 交接    | [boot/start.cc](../src/kernel/boot/start.cc) 配置机器状态，以 `satp = 0` 进入 S-mode                                                              | 可在无分页状态下访问物理 RAM 与 MMIO                 |
+| 早期发现       | 清 `.bss`、`cxx::init()` 执行 `.init_array`，`platform::init()` 绑定 DTB 并挂接 early console                                                     | DTB 可查询；early console 就绪时可输出后续日志       |
+| 平台描述       | `platform::init()` 枚举设备并解析内存/保留区、hart、timebase 与 `/chosen`                                                                         | 平台拓扑与设备资源表只读就绪                         |
+| 分页准备       | `phymem::init()`、`vm::k::init()`                                                                                                                 | 物理页可分配，共享内核根表（含堆与内核栈子树）已建立 |
+| 启用分页       | `vm::k::enable(vm::k::pagetable())`                                                                                                               | 高位内核堆与共享线程栈窗口可访问                     |
+| 内核对象       | `proc::init()` 建立全局唯一系统进程，创建 boot hart 的 `idle` 线程并分配其内核栈槽                                                                | 具备系统进程与可切入的线程上下文                     |
+| 驱动与入口线程 | 按级别 probe 驱动；默认构建在 `char_device::active() != nullptr` 时加载 `#embed` 的 ELF64 `shell` 并入队 U-mode 线程，测试构建入队 `ktest` 运行器 | 外部中断与关机设备就绪，初始线程集固定               |
+| 发布与切换     | release 发布 `g_started`，单向切入 idle                                                                                                           | secondary 可继续初始化；boot 上下文不再恢复          |
 
 `idle()` 在自身线程栈上归还本 hart 的启动栈，安装 `stvec`、配置定时器并开启中断，随后循环 `wfi`。早期 console 挂接失败不影响启动（挂接前输出丢弃），无效 DTB 则直接断言失败。
 
