@@ -23,6 +23,7 @@
 #include <type_traits>
 
 #include "console.h"
+#include "util/format.h"
 
 namespace ktest {
 
@@ -129,7 +130,7 @@ template <typename L, typename R>
     ctx.fail_binary("==",
                     lhs_expr,
                     rhs_expr,
-                    make_format_args(printable(lhs), printable(rhs)),
+                    ::make_format_args(printable(lhs), printable(rhs)),
                     location);
     return false;
 }
@@ -147,7 +148,7 @@ template <typename L, typename R>
     ctx.fail_binary("!=",
                     lhs_expr,
                     rhs_expr,
-                    make_format_args(printable(lhs), printable(rhs)),
+                    ::make_format_args(printable(lhs), printable(rhs)),
                     location);
     return false;
 }

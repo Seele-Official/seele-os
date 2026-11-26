@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <string_view>
 
-#include "format_check.h"
+#include "util/format.h"
 
 // Compile-time string used to build CSR instruction templates.
 //

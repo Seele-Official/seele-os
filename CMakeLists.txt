@@ -25,6 +25,7 @@ if(SEELE_HOST_TESTS)
 
     add_executable(seele_host_tests
         src/kernel/fdt/fdt.cc
+        src/kernel/util/format.cc
         src/tests/host/panic_stub.cc
         src/tests/host/addr_test.cc
         src/tests/host/fdt_test.cc
@@ -291,6 +292,7 @@ add_executable(kernel
     src/kernel/proc/shell.cc
     src/kernel/sched/switch.S
     src/kernel/sched/schedule.cc
+    src/kernel/util/format.cc
     src/cxx/runtime.cc
 )
 

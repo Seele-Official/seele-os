@@ -3,10 +3,10 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "list.h"
 #include "trap.h"
 #include "concurrency/spinlock.h"
 #include "proc/process.h"
+#include "util/list.h"
 
 // Maximum number of harts the kernel can describe.
 //

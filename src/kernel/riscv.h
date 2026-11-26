@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "static_str.h"
+#include "util/static_str.h"
 
 namespace riscv {
 

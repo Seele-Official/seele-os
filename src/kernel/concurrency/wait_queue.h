@@ -17,8 +17,8 @@
 #include <cstddef>
 #include <type_traits>
 
-#include "list.h"
 #include "proc/process.h"
+#include "util/list.h"
 
 class WaitQueue {
 public:

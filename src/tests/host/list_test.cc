@@ -1,7 +1,7 @@
 #include <cstddef>
 #include <vector>
 
-#include "list.h"
+#include "util/list.h"
 #include <gtest/gtest.h>
 
 namespace {

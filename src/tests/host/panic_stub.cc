@@ -1,4 +1,4 @@
-// Host-side panic stubs for hardware-independent kernel headers (e.g. `list.h`)
+// Host-side panic stubs for hardware-independent kernel headers (e.g. `util/list.h`)
 // tested under GoogleTest. Prints the diagnostic to stderr and aborts so
 // `EXPECT_DEATH` can match the failure message in a forked child process.
 

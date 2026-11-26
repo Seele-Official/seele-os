@@ -17,7 +17,7 @@
 #include <source_location>
 #include <string_view>
 
-#include "console.h"
+#include "util/format.h"
 
 // The C ABI entry point. C++ callers should use debug::panicf(), which also
 // records where the panic came from.
@@ -36,7 +36,7 @@ template <typename... Args>
 [[noreturn]] void panicf(std::source_location location,
                          format_string<Args...> fmt,
                          Args&&... args) noexcept {
-    vpanic(location, fmt.get(), make_format_args(args...));
+    vpanic(location, fmt.get(), ::make_format_args(args...));
 }
 
 // The printer behind SEELE_ASSERT / SEELE_DASSERT. `fmt` is empty when the
@@ -51,7 +51,7 @@ template <typename... Args>
                               const char* condition,
                               format_string<Args...> fmt,
                               Args&&... args) noexcept {
-    vassert_fail(location, condition, fmt.get(), make_format_args(args...));
+    vassert_fail(location, condition, fmt.get(), ::make_format_args(args...));
 }
 
 [[noreturn]] inline void assert_fail(std::source_location location,
